@@ -504,126 +504,205 @@ impl OverlayApp {
                         egui::vec2(key.w * size, key.h * size),
                     )
                     .shrink(0.06 * size);
-
                     let angle = key.r.to_radians();
-                    let center = rect.center();
-                    let corner_radius = 0.1 * size;
 
-                    // Fill first; the border is drawn separately so layer keys can carry
-                    // a styled outline. The pressed outline always wins; otherwise a layer
-                    // key uses a heavier styled border hinting how its layer activates.
-                    ui.painter().add(
-                        egui::epaint::RectShape::filled(rect, corner_radius, fill_color)
-                            .with_angle(angle),
-                    );
-
-                    let (border_style, border_width, border_color) =
-                        if pressed || layout_key.border == BorderStyle::None {
-                            (BorderStyle::Solid, border_thickness, stroke_color)
-                        } else {
-                            // Brighten the key's fill color for the outline so it stands out on-theme.
-                            (
-                                layout_key.border,
-                                0.02 * size,
-                                fill_color.lerp_to_gamma(egui::Color32::WHITE, 0.45),
-                            )
-                        };
-                    self.paint_key_border(
+                    self.draw_key_tile(
                         ui,
                         rect,
-                        corner_radius,
-                        egui::Stroke::new(border_width, border_color),
-                        border_style,
-                        size,
-                        center,
                         angle,
-                    );
-
-                    let font = egui::FontId::proportional(0.25 * size * font_scale);
-                    let galleys = self.generate_key_label_galleys(
-                        ui,
                         &layout_key,
-                        rect,
-                        font,
+                        fill_color,
+                        stroke_color,
+                        border_thickness,
                         font_color,
+                        pressed,
+                        size,
+                        font_scale,
                         shift_held,
                         ralt_held,
                     );
+                }
 
-                    // Draw the legend strips: behavior on top, argument on bottom. They
-                    // overlay the key's edges (the primary label stays centered) and are
-                    // tied to the legend existing, not to whether the text fits, so an
-                    // over-long legend never blanks out.
-                    let strip_height = self.strip_metrics().1;
-                    let has_behavior = layout_key.behavior.is_some();
-                    let has_argument = layout_key.argument.is_some();
+                for enc in &keyboard.layout.encoders {
+                    let (effective_layer, is_background_key) =
+                        keyboard.get_effective_encoder_layer(enc.id);
 
-                    if has_behavior {
-                        let strip = egui::Rect::from_min_max(
-                            rect.left_top(),
-                            egui::pos2(rect.right(), rect.top() + strip_height),
-                        );
-                        self.paint_strip(
-                            ui,
-                            strip,
-                            galleys.behavior,
-                            true,
-                            size,
-                            center,
-                            angle,
-                            stroke_color,
-                            font_color,
-                        );
-                    }
+                    let layout_key =
+                        keyboard.get_encoder_display_key(effective_layer as usize, enc.id, enc.direction);
 
-                    if has_argument {
-                        let strip = egui::Rect::from_min_max(
-                            egui::pos2(rect.left(), rect.bottom() - strip_height),
-                            rect.max,
-                        );
-                        self.paint_strip(
-                            ui,
-                            strip,
-                            galleys.argument,
-                            false,
-                            size,
-                            center,
-                            angle,
-                            stroke_color,
-                            font_color,
-                        );
-                    }
+                    let first_layer_key_kind =
+                        keyboard.get_encoder_display_key(0, enc.id, enc.direction).kind;
 
-                    let draw_text = |pos, galley| {
-                        ui.painter()
-                            .add(rotated_text_shape(pos, galley, font_color, center, angle));
-                    };
-                    match (galleys.symbol, galleys.text) {
-                        (Some(symbol_galley), Some(text_galley)) => {
-                            let gap = 0.06 * size;
-                            let total_width =
-                                symbol_galley.rect.width() + gap + text_galley.rect.width();
-                            let start_x = center.x - total_width * 0.5;
+                    let KeyColors {
+                        fill: fill_color,
+                        border: stroke_color,
+                        border_thickness,
+                        font: font_color,
+                    } = self.get_keycode_color(
+                        layout_key.layer_ref.unwrap_or(effective_layer),
+                        first_layer_key_kind,
+                        is_background_key,
+                        false, // no rotation-press HID event exists to track
+                    );
 
-                            let text_pos_x = start_x + gap + symbol_galley.rect.width();
-                            let text_pos =
-                                egui::pos2(text_pos_x, center.y - text_galley.rect.center().y);
-                            let sym_pos =
-                                egui::pos2(start_x, center.y - symbol_galley.rect.center().y);
-                            draw_text(sym_pos, symbol_galley);
-                            draw_text(text_pos, text_galley);
-                        }
-                        (Some(symbol_galley), None) => {
-                            let sym_pos = center - symbol_galley.rect.center().to_vec2();
-                            draw_text(sym_pos, symbol_galley);
-                        }
-                        (None, Some(text_galley)) => {
-                            let label_pos = center - text_galley.rect.center().to_vec2();
-                            draw_text(label_pos, text_galley);
-                        }
-                        _ => {}
-                    }
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(enc.x * size, enc.y * size) + window_pos.to_vec2(),
+                        egui::vec2(enc.w * size, enc.h * size),
+                    )
+                    .shrink(0.06 * size);
+                    let angle = enc.r.to_radians();
+
+                    self.draw_key_tile(
+                        ui,
+                        rect,
+                        angle,
+                        &layout_key,
+                        fill_color,
+                        stroke_color,
+                        border_thickness,
+                        font_color,
+                        false,
+                        size,
+                        font_scale,
+                        shift_held,
+                        ralt_held,
+                    );
                 }
             });
+    }
+
+    /// Paints one key- or encoder-shaped tile: fill, border, and legend
+    /// (symbol/tap/behavior-argument strips). Shared by the regular per-key
+    /// loop and the per-encoder loop above so neither duplicates this.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_key_tile(
+        &self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        angle: f32,
+        layout_key: &LayoutKey,
+        fill_color: egui::Color32,
+        stroke_color: egui::Color32,
+        border_thickness: f32,
+        font_color: egui::Color32,
+        pressed: bool,
+        size: f32,
+        font_scale: f32,
+        shift_held: bool,
+        ralt_held: bool,
+    ) {
+        let center = rect.center();
+        let corner_radius = 0.1 * size;
+
+        // Fill first; the border is drawn separately so layer keys can carry
+        // a styled outline. The pressed outline always wins; otherwise a layer
+        // key uses a heavier styled border hinting how its layer activates.
+        ui.painter().add(
+            egui::epaint::RectShape::filled(rect, corner_radius, fill_color).with_angle(angle),
+        );
+
+        let (border_style, border_width, border_color) =
+            if pressed || layout_key.border == BorderStyle::None {
+                (BorderStyle::Solid, border_thickness, stroke_color)
+            } else {
+                // Brighten the key's fill color for the outline so it stands out on-theme.
+                (
+                    layout_key.border,
+                    0.02 * size,
+                    fill_color.lerp_to_gamma(egui::Color32::WHITE, 0.45),
+                )
+            };
+        self.paint_key_border(
+            ui,
+            rect,
+            corner_radius,
+            egui::Stroke::new(border_width, border_color),
+            border_style,
+            size,
+            center,
+            angle,
+        );
+
+        let font = egui::FontId::proportional(0.25 * size * font_scale);
+        let galleys = self.generate_key_label_galleys(
+            ui,
+            layout_key,
+            rect,
+            font,
+            font_color,
+            shift_held,
+            ralt_held,
+        );
+
+        // Draw the legend strips: behavior on top, argument on bottom. They
+        // overlay the key's edges (the primary label stays centered) and are
+        // tied to the legend existing, not to whether the text fits, so an
+        // over-long legend never blanks out.
+        let strip_height = self.strip_metrics().1;
+        let has_behavior = layout_key.behavior.is_some();
+        let has_argument = layout_key.argument.is_some();
+
+        if has_behavior {
+            let strip = egui::Rect::from_min_max(
+                rect.left_top(),
+                egui::pos2(rect.right(), rect.top() + strip_height),
+            );
+            self.paint_strip(
+                ui,
+                strip,
+                galleys.behavior,
+                true,
+                size,
+                center,
+                angle,
+                stroke_color,
+                font_color,
+            );
+        }
+
+        if has_argument {
+            let strip = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.bottom() - strip_height),
+                rect.max,
+            );
+            self.paint_strip(
+                ui,
+                strip,
+                galleys.argument,
+                false,
+                size,
+                center,
+                angle,
+                stroke_color,
+                font_color,
+            );
+        }
+
+        let draw_text = |pos, galley| {
+            ui.painter()
+                .add(rotated_text_shape(pos, galley, font_color, center, angle));
+        };
+        match (galleys.symbol, galleys.text) {
+            (Some(symbol_galley), Some(text_galley)) => {
+                let gap = 0.06 * size;
+                let total_width = symbol_galley.rect.width() + gap + text_galley.rect.width();
+                let start_x = center.x - total_width * 0.5;
+
+                let text_pos_x = start_x + gap + symbol_galley.rect.width();
+                let text_pos = egui::pos2(text_pos_x, center.y - text_galley.rect.center().y);
+                let sym_pos = egui::pos2(start_x, center.y - symbol_galley.rect.center().y);
+                draw_text(sym_pos, symbol_galley);
+                draw_text(text_pos, text_galley);
+            }
+            (Some(symbol_galley), None) => {
+                let sym_pos = center - symbol_galley.rect.center().to_vec2();
+                draw_text(sym_pos, symbol_galley);
+            }
+            (None, Some(text_galley)) => {
+                let label_pos = center - text_galley.rect.center().to_vec2();
+                draw_text(label_pos, text_galley);
+            }
+            _ => {}
+        }
     }
 }

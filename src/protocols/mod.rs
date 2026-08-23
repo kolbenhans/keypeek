@@ -39,17 +39,57 @@ pub struct Key {
     pub r: f32,
 }
 
+/// Vial: one tile per direction. VIA: a single tile shows both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EncoderDirection {
+    Clockwise,
+    CounterClockwise,
+    Both,
+}
+
+/// Only covers CW/CCW rotation legends.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EncoderTile {
+    pub id: u8,
+    pub direction: EncoderDirection,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub r: f32,
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct KeyboardLayout {
     pub name: String,
     pub keys: Vec<Key>,
+    #[serde(default)]
+    pub encoders: Vec<EncoderTile>,
 }
 
 impl KeyboardLayout {
     pub fn get_dimensions(&self) -> (f32, f32) {
-        let max_x = self.keys.iter().map(|k| k.x + k.w).fold(0.0, f32::max);
-        let max_y = self.keys.iter().map(|k| k.y + k.h).fold(0.0, f32::max);
+        let max_x = self
+            .keys
+            .iter()
+            .map(|k| k.x + k.w)
+            .chain(self.encoders.iter().map(|e| e.x + e.w))
+            .fold(0.0, f32::max);
+        let max_y = self
+            .keys
+            .iter()
+            .map(|k| k.y + k.h)
+            .chain(self.encoders.iter().map(|e| e.y + e.h))
+            .fold(0.0, f32::max);
         (max_x, max_y)
+    }
+
+    pub fn encoder_count(&self) -> usize {
+        self.encoders
+            .iter()
+            .map(|e| e.id as usize + 1)
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -87,6 +127,16 @@ pub trait KeyboardProtocol: Send {
         rows: usize,
         cols: usize,
     ) -> Vec<Vec<Vec<Option<LayoutKey>>>>;
+
+    /// `[layer][encoder_id] -> (ccw, cw)`. Default-empty: only Vial and VIA
+    /// expose a real query for this.
+    fn read_all_encoders(
+        &self,
+        _layers: usize,
+        _encoder_count: usize,
+    ) -> Vec<Vec<(Option<LayoutKey>, Option<LayoutKey>)>> {
+        Vec::new()
+    }
 
     fn hid_read(&self) -> Result<Vec<u8>, Box<dyn Error>>;
 

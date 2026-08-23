@@ -77,6 +77,33 @@ impl KeyboardProtocol for ViaProtocol {
         keys
     }
 
+    fn read_all_encoders(
+        &self,
+        layers: usize,
+        encoder_count: usize,
+    ) -> Vec<Vec<(Option<LayoutKey>, Option<LayoutKey>)>> {
+        // VIA: one direction per call. Vial: both directions per call.
+        (0..layers)
+            .map(|layer| {
+                (0..encoder_count)
+                    .map(|id| {
+                        let ccw = self
+                            .api
+                            .get_encoder_value(layer as u8, id as u8, false)
+                            .ok()
+                            .and_then(get_layout_key);
+                        let cw = self
+                            .api
+                            .get_encoder_value(layer as u8, id as u8, true)
+                            .ok()
+                            .and_then(get_layout_key);
+                        (ccw, cw)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     fn hid_read(&self) -> Result<Vec<u8>, Box<dyn Error>> {
         self.api
             .hid_read()

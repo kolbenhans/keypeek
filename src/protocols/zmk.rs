@@ -198,6 +198,7 @@ fn build_from_zmk_data(vid: u16, pid: u16, data: ZmkData) -> Result<ZmkLayout, B
         layouts: vec![KeyboardLayout {
             name: ACTIVE_LAYOUT_NAME.to_string(),
             keys: active_keys,
+            encoders: Vec::new(), // zmk_studio_api has no encoder surface at all
         }],
     };
 

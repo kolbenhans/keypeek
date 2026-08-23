@@ -1,5 +1,5 @@
 use super::layout_geometry::flattened_top_left_after_center_rotation;
-use super::{Key, KeyboardDefinition, KeyboardLayout};
+use super::{EncoderDirection, EncoderTile, Key, KeyboardDefinition, KeyboardLayout};
 use serde_json::Value;
 use std::error::Error;
 use std::fs::File;
@@ -29,10 +29,11 @@ pub fn parse_qmk_json_value(json: &Value) -> Result<KeyboardDefinition, Box<dyn 
 
     for layout_name in raw_layouts.keys() {
         let raw_layout = &raw_layouts[layout_name];
-        let keys = collect_layout_keys(raw_layout)?;
+        let (keys, encoders) = collect_layout_keys(raw_layout)?;
         let layout = KeyboardLayout {
             name: layout_name.clone(),
             keys,
+            encoders,
         };
         layouts.push(layout);
     }
@@ -93,26 +94,21 @@ pub fn parse_qmk_json_value(json: &Value) -> Result<KeyboardDefinition, Box<dyn 
     })
 }
 
-fn collect_layout_keys(layout: &Value) -> Result<Vec<Key>, Box<dyn Error>> {
+fn collect_layout_keys(layout: &Value) -> Result<(Vec<Key>, Vec<EncoderTile>), Box<dyn Error>> {
     let layout = layout["layout"]
         .as_array()
         .ok_or_else(|| Box::<dyn Error>::from("No layout array found."))?;
 
     let mut keys = Vec::new();
+    let mut encoders = Vec::new();
     for key in layout {
-        let matrix_values = key["matrix"].as_array().ok_or_else(|| {
-            Box::<dyn Error>::from("Unable to find 'matrix' array in key definition.")
-        })?;
-
-        let matrix_u64 = matrix_values
-            .iter()
-            .map(|v| {
-                v.as_u64()
-                    .ok_or_else(|| Box::<dyn Error>::from("Unable to parse 'matrix' value."))
-            })
-            .collect::<Result<Vec<u64>, Box<dyn Error>>>()?;
-
-        let matrix: Vec<usize> = matrix_u64.into_iter().map(|n| n as usize).collect();
+        let matrix: Option<Vec<usize>> = key["matrix"].as_array().map(|matrix_values| {
+            matrix_values
+                .iter()
+                .filter_map(|v| v.as_u64())
+                .map(|n| n as usize)
+                .collect()
+        });
 
         let x = key["x"].as_f64().unwrap_or(0.0) as f32;
         let y = key["y"].as_f64().unwrap_or(0.0) as f32;
@@ -136,18 +132,34 @@ fn collect_layout_keys(layout: &Value) -> Result<Vec<Key>, Box<dyn Error>> {
         let (x, y) =
             flattened_top_left_after_center_rotation(x, y, w, h, angle_deg, pivot_x, pivot_y);
 
-        keys.push(Key {
-            row: matrix[0],
-            col: matrix[1],
-            x,
-            y,
-            w,
-            h,
-            r: angle_deg,
-        });
+        if let Some(matrix) = &matrix {
+            if matrix.len() >= 2 {
+                keys.push(Key {
+                    row: matrix[0],
+                    col: matrix[1],
+                    x,
+                    y,
+                    w,
+                    h,
+                    r: angle_deg,
+                });
+            }
+        }
+
+        if let Some(id) = key.get("encoder").and_then(|v| v.as_u64()) {
+            encoders.push(EncoderTile {
+                id: id as u8,
+                direction: EncoderDirection::Both,
+                x,
+                y,
+                w,
+                h,
+                r: angle_deg,
+            });
+        }
     }
 
-    Ok(keys)
+    Ok((keys, encoders))
 }
 
 fn hex_to_u16(hex_string: &str) -> Result<u16, ParseIntError> {
