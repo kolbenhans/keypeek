@@ -1,0 +1,22 @@
+name: Contribution Proposal
+description: You'd like to implement something and want to check first — avoid duplicate work and confirm the maintainer wants it
+labels: ["proposal"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What would you like to build?
+      description: What the change does, and roughly how you'd approach it.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Why is this needed?
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked open issues/PRs and this isn't already in progress
+        - label: I'm asking before writing code, in case the maintainer has a different approach in mind or doesn't want this in scope
