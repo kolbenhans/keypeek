@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use crate::key_action::KeyAction;
 use crate::key_matrix::{BoundKey, KeyMatrix};
 use crate::layout_key::LayoutKey;
-use crate::protocols::{DeviceLocked, KeyboardLayout, KeyboardProtocol, WriteSupport};
+use crate::protocols::{
+    DeviceLocked, EncoderDirection, KeyboardLayout, KeyboardProtocol, WriteSupport,
+};
 use crate::ui_wake::UiWake;
 use std::error::Error;
 
@@ -139,6 +141,9 @@ pub struct Keyboard {
     layout: Mutex<KeyboardLayout>,
     overlay_visibility: Arc<Mutex<VisibilityWindow>>,
     matrix: Arc<Mutex<KeyMatrix>>,
+    // Populated once here in `new` and never mutated again — there's no
+    // live encoder-rotation HID event in this protocol.
+    encoder_keys: Vec<Vec<(Option<LayoutKey>, Option<LayoutKey>)>>,
     layer_state: Arc<Mutex<u32>>,
     default_layer_state: Arc<Mutex<u32>>,
     config: Arc<Mutex<OverlayConfig>>,
@@ -268,6 +273,7 @@ impl Keyboard {
 
         let write_support = protocol.write_support();
         let (command_tx, command_rx) = mpsc::channel::<KeymapCommand>();
+        let encoder_keys = protocol.read_all_encoders(snapshot.layers.len(), layout.encoder_count());
 
         let layer_state = Arc::new(Mutex::new(0));
         let default_layer_state = Arc::new(Mutex::new(0));
@@ -299,6 +305,7 @@ impl Keyboard {
             layout: Mutex::new(layout),
             matrix: Arc::clone(&matrix),
             overlay_visibility: Arc::clone(&overlay_visibility),
+            encoder_keys,
             layer_state: Arc::clone(&layer_state),
             default_layer_state: Arc::clone(&default_layer_state),
             config: Arc::clone(&config),
@@ -486,6 +493,66 @@ impl Keyboard {
             .cloned()
     }
 
+    /// Mirrors `get_effective_key_layer` exactly.
+    pub fn get_effective_encoder_layer(&self, id: u8) -> (u8, bool) {
+        let layer_state = *self.layer_state.lock().unwrap();
+        let default_layer_state = *self.default_layer_state.lock().unwrap();
+        let num_layers = self.encoder_keys.len().min(32);
+
+        let mut active_layer_above = false;
+
+        for i in (1..num_layers).rev() {
+            let layer_mask = 1u32 << (i as u32);
+            let is_active_default_layer = (default_layer_state & layer_mask) != 0;
+            let is_active_momentary_layer = (layer_state & layer_mask) != 0;
+            if (is_active_momentary_layer || is_active_default_layer)
+                && !self.is_encoder_transparent(i, id)
+            {
+                return (i as u8, is_active_default_layer && active_layer_above);
+            }
+            active_layer_above |= is_active_momentary_layer;
+        }
+
+        (0, active_layer_above)
+    }
+
+    fn is_encoder_transparent(&self, layer: usize, id: u8) -> bool {
+        self.encoder_keys
+            .get(layer)
+            .and_then(|l| l.get(id as usize))
+            .map(|(ccw, cw)| ccw.is_none() && cw.is_none())
+            .unwrap_or(true)
+    }
+
+    pub fn get_encoder_key(&self, layer: usize, id: u8, clockwise: bool) -> Option<LayoutKey> {
+        let (ccw, cw) = self.encoder_keys.get(layer)?.get(id as usize)?;
+        (if clockwise { cw } else { ccw }).clone()
+    }
+
+    /// `Both` (VIA's one-tile case) synthesizes a combined key reusing the
+    /// existing tap+shifted stack display.
+    pub fn get_encoder_display_key(
+        &self,
+        layer: usize,
+        id: u8,
+        direction: EncoderDirection,
+    ) -> LayoutKey {
+        match direction {
+            EncoderDirection::Clockwise => self.get_encoder_key(layer, id, true).unwrap_or_default(),
+            EncoderDirection::CounterClockwise => {
+                self.get_encoder_key(layer, id, false).unwrap_or_default()
+            }
+            EncoderDirection::Both => {
+                let cw = self.get_encoder_key(layer, id, true).unwrap_or_default();
+                let ccw_text = self.get_encoder_key(layer, id, false).map(|k| k.tap.full);
+                LayoutKey {
+                    shifted: ccw_text,
+                    ..cw
+                }
+            }
+        }
+    }
+
     pub fn is_key_pressed(&self, row: usize, col: usize) -> bool {
         self.matrix.lock().unwrap().is_pressed(row, col)
     }
@@ -662,5 +729,70 @@ mod tests {
         assert!(!excluded.is_visible(start));
         let base = next_visibility_window(Base, Excluded, excluded, start, no_delay);
         assert!(!base.is_visible(start));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal `Keyboard` for testing layer-resolution logic in isolation.
+    fn fixture_keyboard(
+        encoder_keys: Vec<Vec<(Option<LayoutKey>, Option<LayoutKey>)>>,
+        layer_state: u32,
+        default_layer_state: u32,
+    ) -> Keyboard {
+        Keyboard {
+            layout: KeyboardLayout {
+                name: "test".to_string(),
+                keys: Vec::new(),
+                encoders: Vec::new(),
+            },
+            time_to_hide_overlay: Arc::new(Mutex::new(None)),
+            matrix: Arc::new(Mutex::new(KeyMatrix::from_layout_keys(Vec::new(), 0, 0))),
+            encoder_keys,
+            layer_state: Arc::new(Mutex::new(layer_state)),
+            default_layer_state: Arc::new(Mutex::new(default_layer_state)),
+            timeout_ms: Arc::new(AtomicI64::new(-1)),
+            visible_layers: Arc::new(AtomicU32::new(u32::MAX)),
+            alive: Arc::new(AtomicBool::new(true)),
+            _keepalive: None,
+        }
+    }
+
+    fn bound(keycode: &str) -> Option<LayoutKey> {
+        Some(LayoutKey {
+            tap: crate::layout_key::Label::new(keycode),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn effective_encoder_layer_falls_through_transparent_layers() {
+        // Layer 0 bound, layer 1 transparent (both directions unbound),
+        // layer 2 bound. Layer 2 held (momentary) -> should win outright.
+        let encoder_keys = vec![
+            vec![(bound("KC_VOLD"), bound("KC_VOLU"))], // layer 0
+            vec![(None, None)],                         // layer 1: transparent
+            vec![(bound("KC_LEFT"), bound("KC_RGHT"))], // layer 2
+        ];
+        let layer_mask_2 = 1u32 << 2;
+        let keyboard = fixture_keyboard(encoder_keys, layer_mask_2, 0);
+
+        assert_eq!(keyboard.get_effective_encoder_layer(0), (2, false));
+        assert_eq!(
+            keyboard.get_encoder_key(2, 0, true).unwrap().tap.full,
+            "KC_RGHT"
+        );
+    }
+
+    #[test]
+    fn effective_encoder_layer_falls_back_to_base_when_nothing_held() {
+        let encoder_keys = vec![
+            vec![(bound("KC_VOLD"), bound("KC_VOLU"))],
+            vec![(None, None)],
+        ];
+        let keyboard = fixture_keyboard(encoder_keys, 0, 0);
+        assert_eq!(keyboard.get_effective_encoder_layer(0), (0, false));
     }
 }

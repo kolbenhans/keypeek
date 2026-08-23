@@ -148,6 +148,53 @@ impl OverlayApp {
                     );
                 }
 
+                // Encoders share the key loop's pin/color/paint conventions, just
+                // sourced from `get_effective_encoder_layer`/`get_encoder_display_key`
+                // instead of the row/col matrix. Not clickable: the keymap editor has
+                // no encoder target yet.
+                for enc in &layout.encoders {
+                    let (effective_layer, is_background_key) = match pinned {
+                        Some(layer) => (layer as u8, false),
+                        None => keyboard.get_effective_encoder_layer(enc.id),
+                    };
+
+                    let layout_key = keyboard.get_encoder_display_key(
+                        effective_layer as usize,
+                        enc.id,
+                        enc.direction,
+                    );
+                    let first_layer_key_kind =
+                        keyboard.get_encoder_display_key(0, enc.id, enc.direction).kind;
+
+                    let colors = style.colors_for(
+                        layout_key.layer_ref.unwrap_or(effective_layer),
+                        first_layer_key_kind,
+                        is_background_key,
+                        false, // no rotation-press HID event exists to track
+                    );
+
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(enc.x * size, enc.y * size) + window_pos.to_vec2(),
+                        egui::vec2(enc.w * size, enc.h * size),
+                    );
+                    let angle = enc.r.to_radians();
+
+                    key_paint::paint(
+                        ui,
+                        rect,
+                        angle,
+                        &KeyDisplay {
+                            key: &layout_key,
+                            colors,
+                            hovered: false,
+                            pressed: false,
+                            shift_held,
+                            ralt_held,
+                        },
+                        &style,
+                    );
+                }
+
                 (hovered_key, overlay_response.clicked())
             });
 
