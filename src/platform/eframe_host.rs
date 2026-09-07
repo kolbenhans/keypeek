@@ -22,7 +22,8 @@ impl OverlayHost for EframeHost<'_> {
     }
 
     fn request_close(&mut self) {
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        // ViewportCommand::Close alone doesn't reliably end the process on X11.
+        std::process::exit(0);
     }
 }
 
