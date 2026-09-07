@@ -61,14 +61,17 @@ impl EframeApp {
             return;
         };
 
-        // Physical, monitor-native coordinates via winit directly -- avoids
-        // the previous logical-coord conversion using the wrong monitor's
-        // scale factor (root cause of the X11 off-placement report on
-        // mixed-DPI setups). Also drops the Windows-only maximize dance:
-        // suggested by @srwi in PR review, confirmed to fix Windows HDR/DWM
-        // per-pixel-alpha sizing without it.
-        window.set_outer_position(monitor.position());
-        let _ = window.request_inner_size(monitor.size());
+        // Ensure the window fits on the target monitor
+        let current_size = window.inner_size();
+        let target_size = monitor.size();
+
+        if target_size.width < current_size.width || target_size.height < current_size.height {
+            let _ = window.request_inner_size(target_size);
+            window.set_outer_position(monitor.position());
+        } else {
+            window.set_outer_position(monitor.position());
+            let _ = window.request_inner_size(target_size);
+        }
 
         // Moving/maximizing can drop always-on-top — re-assert.
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
@@ -205,7 +208,7 @@ fn run_inner(
 
     #[cfg(target_os = "linux")]
     {
-        viewport = viewport.with_window_type(egui::X11WindowType::Dock);
+        viewport = viewport.with_window_type(egui::X11WindowType::Utility);
     }
 
     #[allow(unused_mut)]
