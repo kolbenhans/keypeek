@@ -122,6 +122,9 @@ struct WaylandApp {
 
     /// First pass done; see `draw()`.
     primed: bool,
+    /// A real scale value has been confirmed, either pre-seeded from the
+    /// target output at startup or from a scale event; see `draw()`.
+    scale_confirmed: bool,
 }
 
 pub fn run(
@@ -183,6 +186,7 @@ pub fn run(
         exit: false,
         repaint_at: None,
         primed: false,
+        scale_confirmed: false,
     };
 
     // Roundtrip once on the main queue so output_state receives all outputs and their names.
@@ -196,6 +200,7 @@ pub fn run(
     {
         if scale > 0.0 {
             state.scale = scale;
+            state.scale_confirmed = true;
         }
     }
 
@@ -346,8 +351,11 @@ impl WaylandApp {
         // ctx.viewport_rect() is bogus on the first hand-driven egui pass (the
         // compositor hasn't delivered a real configure/preferred_scale yet), so the
         // settings window's one-shot default_pos would bake in a wrong center and
-        // never recover. Hide it for just that first frame.
-        let suppress_settings_this_frame = !self.primed;
+        // never recover. Hide it until both the first pass is behind us AND we know
+        // the real scale: on `MonitorSelection::Primary` nothing pre-seeds `scale`,
+        // so `configure()` (and thus this first `draw()` call) can land before the
+        // fractional-scale event does -- one suppressed frame isn't always enough.
+        let suppress_settings_this_frame = !self.primed || !self.scale_confirmed;
         self.primed = true;
         let was_settings_visible = self.app.ui.settings_visible;
         if suppress_settings_this_frame {
@@ -434,9 +442,11 @@ impl CompositorHandler for WaylandApp {
             return;
         }
         let new_factor = new_factor as f64;
-        if new_factor != self.scale && new_factor > 0.0 {
+        if new_factor > 0.0 {
+            let changed = new_factor != self.scale;
             self.scale = new_factor;
-            if self.configured {
+            self.scale_confirmed = true;
+            if changed && self.configured {
                 self.init_or_resize_gl(conn);
                 self.needs_redraw = true;
             }
@@ -708,9 +718,11 @@ impl Dispatch<WpFractionalScaleV1, ()> for WaylandApp {
         // The compositor reports the preferred scale in 120ths.
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
             let new_scale = scale as f64 / 120.0;
-            if new_scale > 0.0 && new_scale != state.scale {
+            if new_scale > 0.0 {
+                let changed = new_scale != state.scale;
                 state.scale = new_scale;
-                if state.configured {
+                state.scale_confirmed = true;
+                if changed && state.configured {
                     state.init_or_resize_gl(conn);
                     state.needs_redraw = true;
                 }
