@@ -340,22 +340,19 @@ impl WaylandApp {
             return;
         }
 
-        // Commit an empty transparent frame on the very first pass so the compositor
-        // assigns the surface to the output and delivers preferred_scale/configure
-        // before egui calculates window placements.
-        if !self.primed {
-            self.primed = true;
-            let size_px = self.size_px();
-            if let Some(gl) = self.gl.as_ref() {
-                egui_glow::painter::clear(gl, size_px, [0.0, 0.0, 0.0, 0.0]);
-            }
-            let _ = egl.swap_buffers();
-            self.needs_redraw = true;
-            return;
-        }
-
         self.egui_ctx.set_pixels_per_point(self.scale as f32);
         let raw_input = self.input.take_raw_input((self.width, self.height));
+
+        // ctx.viewport_rect() is bogus on the first hand-driven egui pass (the
+        // compositor hasn't delivered a real configure/preferred_scale yet), so the
+        // settings window's one-shot default_pos would bake in a wrong center and
+        // never recover. Hide it for just that first frame.
+        let suppress_settings_this_frame = !self.primed;
+        self.primed = true;
+        let was_settings_visible = self.app.ui.settings_visible;
+        if suppress_settings_this_frame {
+            self.app.ui.settings_visible = false;
+        }
 
         let ctx = self.egui_ctx.clone();
         let mut host = WaylandHost::default();
@@ -365,6 +362,10 @@ impl WaylandApp {
             app.ui(&ctx, &mut host);
             ctx.end_pass()
         };
+        if suppress_settings_this_frame {
+            self.app.ui.settings_visible = was_settings_visible;
+            self.needs_redraw = true;
+        }
 
         let clear = self.app.clear_color().to_array();
         let primitives = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
