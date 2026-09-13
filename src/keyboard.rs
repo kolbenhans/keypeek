@@ -269,11 +269,12 @@ impl Keyboard {
             .iter()
             .map(|l| l.name.clone().unwrap_or_default())
             .collect();
+        let num_layers = snapshot.layers.len();
         let matrix = KeyMatrix::from_snapshot(snapshot, definition.rows, definition.cols);
 
         let write_support = protocol.write_support();
         let (command_tx, command_rx) = mpsc::channel::<KeymapCommand>();
-        let encoder_keys = protocol.read_all_encoders(snapshot.layers.len(), layout.encoder_count());
+        let encoder_keys = protocol.read_all_encoders(num_layers, layout.encoder_count());
 
         let layer_state = Arc::new(Mutex::new(0));
         let default_layer_state = Arc::new(Mutex::new(0));
@@ -538,7 +539,9 @@ impl Keyboard {
         direction: EncoderDirection,
     ) -> LayoutKey {
         match direction {
-            EncoderDirection::Clockwise => self.get_encoder_key(layer, id, true).unwrap_or_default(),
+            EncoderDirection::Clockwise => {
+                self.get_encoder_key(layer, id, true).unwrap_or_default()
+            }
             EncoderDirection::CounterClockwise => {
                 self.get_encoder_key(layer, id, false).unwrap_or_default()
             }
@@ -730,33 +733,37 @@ mod tests {
         let base = next_visibility_window(Base, Excluded, excluded, start, no_delay);
         assert!(!base.is_visible(start));
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Minimal `Keyboard` for testing layer-resolution logic in isolation.
+    /// Minimal `Keyboard` for testing encoder layer-resolution logic in isolation.
     fn fixture_keyboard(
         encoder_keys: Vec<Vec<(Option<LayoutKey>, Option<LayoutKey>)>>,
         layer_state: u32,
         default_layer_state: u32,
     ) -> Keyboard {
         Keyboard {
-            layout: KeyboardLayout {
+            layout: Mutex::new(KeyboardLayout {
                 name: "test".to_string(),
                 keys: Vec::new(),
                 encoders: Vec::new(),
-            },
-            time_to_hide_overlay: Arc::new(Mutex::new(None)),
-            matrix: Arc::new(Mutex::new(KeyMatrix::from_layout_keys(Vec::new(), 0, 0))),
+            }),
+            overlay_visibility: Arc::new(Mutex::new(VisibilityWindow::hidden(Instant::now()))),
+            matrix: Arc::new(Mutex::new(KeyMatrix::from_snapshot(
+                crate::key_action::KeymapSnapshot {
+                    layers: Vec::new(),
+                    actions: Vec::new(),
+                },
+                0,
+                0,
+            ))),
             encoder_keys,
             layer_state: Arc::new(Mutex::new(layer_state)),
             default_layer_state: Arc::new(Mutex::new(default_layer_state)),
-            timeout_ms: Arc::new(AtomicI64::new(-1)),
-            visible_layers: Arc::new(AtomicU32::new(u32::MAX)),
+            config: Arc::new(Mutex::new(CONFIG)),
             alive: Arc::new(AtomicBool::new(true)),
+            command_tx: mpsc::channel().0,
+            write_support: WriteSupport::None,
             _keepalive: None,
+            action_filter: None,
         }
     }
 

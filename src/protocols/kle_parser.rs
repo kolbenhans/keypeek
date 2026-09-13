@@ -223,19 +223,21 @@ mod tests {
 
     #[test]
     fn stacked_encoder_cells_share_an_id_topmost_is_clockwise() {
-        let keymap = json!([
-            ["e"],
-            ["e"],
-            ["0,0"],
-        ]);
+        let keymap = json!([["e"], ["e"], ["0,0"],]);
         let keymap = keymap.as_array().unwrap();
         let (keys, encoders) = parse_kle_keymap(keymap).unwrap();
 
         assert_eq!(keys.len(), 1, "the one real matrix key must still parse");
         assert_eq!(encoders.len(), 2);
-        assert_eq!(encoders[0].id, encoders[1].id, "both tiles share one encoder id");
+        assert_eq!(
+            encoders[0].id, encoders[1].id,
+            "both tiles share one encoder id"
+        );
 
-        let cw = encoders.iter().filter(|e| e.direction == EncoderDirection::Clockwise).count();
+        let cw = encoders
+            .iter()
+            .filter(|e| e.direction == EncoderDirection::Clockwise)
+            .count();
         let ccw = encoders
             .iter()
             .filter(|e| e.direction == EncoderDirection::CounterClockwise)

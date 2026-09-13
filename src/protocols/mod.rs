@@ -16,6 +16,7 @@ use self::mock::MockProtocol;
 use self::via::ViaProtocol;
 use self::vial::VialProtocol;
 use self::zmk::ZmkProtocol;
+use crate::layout_key::LayoutKey;
 
 pub use self::zmk_rpc::DeviceLocked;
 

@@ -4,6 +4,8 @@ use super::{
     WriteSupport,
 };
 use crate::key_action::{KeyAction, KeymapSnapshot};
+use crate::layout_key::LayoutKey;
+use crate::qmk_keycode_labels::qmk_to_layout_key;
 use qmk_via_api::api::KeyboardApi;
 use std::error::Error;
 
@@ -71,12 +73,12 @@ impl KeyboardProtocol for ViaProtocol {
                             .api
                             .get_encoder_value(layer as u8, id as u8, false)
                             .ok()
-                            .and_then(get_layout_key);
+                            .and_then(qmk_to_layout_key);
                         let cw = self
                             .api
                             .get_encoder_value(layer as u8, id as u8, true)
                             .ok()
-                            .and_then(get_layout_key);
+                            .and_then(qmk_to_layout_key);
                         (ccw, cw)
                     })
                     .collect()

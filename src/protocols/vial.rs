@@ -4,6 +4,8 @@ use super::{
     WriteSupport,
 };
 use crate::key_action::{KeyAction, KeymapSnapshot};
+use crate::layout_key::LayoutKey;
+use crate::qmk_keycode_labels::qmk_to_layout_key;
 use qmk_via_api::api::KeyboardApi;
 use std::error::Error;
 
@@ -169,7 +171,7 @@ impl KeyboardProtocol for VialProtocol {
                         };
                         let ccw = u16::from_be_bytes([response[0], response[1]]);
                         let cw = u16::from_be_bytes([response[2], response[3]]);
-                        (get_layout_key(ccw), get_layout_key(cw))
+                        (qmk_to_layout_key(ccw), qmk_to_layout_key(cw))
                     })
                     .collect()
             })

@@ -163,8 +163,9 @@ impl OverlayApp {
                         enc.id,
                         enc.direction,
                     );
-                    let first_layer_key_kind =
-                        keyboard.get_encoder_display_key(0, enc.id, enc.direction).kind;
+                    let first_layer_key_kind = keyboard
+                        .get_encoder_display_key(0, enc.id, enc.direction)
+                        .kind;
 
                     let colors = style.colors_for(
                         layout_key.layer_ref.unwrap_or(effective_layer),
