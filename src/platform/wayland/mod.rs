@@ -125,6 +125,11 @@ struct WaylandApp {
     /// A real scale value has been confirmed, either pre-seeded from the
     /// target output at startup or from a scale event; see `draw()`.
     scale_confirmed: bool,
+    /// `scale_confirmed` has held since *before* the current frame -- egui only
+    /// reflects a `set_pixels_per_point()` call in `viewport_rect()` starting the
+    /// pass *after* the one it was requested in, so the frame where scale first
+    /// becomes confirmed still computes geometry against the old (wrong) ppp.
+    scale_settled: bool,
 }
 
 pub fn run(
@@ -187,6 +192,7 @@ pub fn run(
         repaint_at: None,
         primed: false,
         scale_confirmed: false,
+        scale_settled: false,
     };
 
     // Roundtrip once on the main queue so output_state receives all outputs and their names.
@@ -355,7 +361,15 @@ impl WaylandApp {
         // the real scale: on `MonitorSelection::Primary` nothing pre-seeds `scale`,
         // so `configure()` (and thus this first `draw()` call) can land before the
         // fractional-scale event does -- one suppressed frame isn't always enough.
-        let suppress_settings_this_frame = !self.primed || !self.scale_confirmed;
+        // And even once confirmed, `set_pixels_per_point()` above only reaches
+        // `viewport_rect()` starting the *next* pass, so the frame scale is first
+        // confirmed in still computes against the old ppp -- read `scale_settled`
+        // before updating it so that frame stays suppressed too.
+        let was_settled = self.scale_settled;
+        if self.scale_confirmed {
+            self.scale_settled = true;
+        }
+        let suppress_settings_this_frame = !self.primed || !was_settled;
         self.primed = true;
         let was_settings_visible = self.app.ui.settings_visible;
         if suppress_settings_this_frame {
