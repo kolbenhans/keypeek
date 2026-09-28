@@ -77,6 +77,51 @@ const HID_TO_EVDEV: [u8; 256] = [
     150,158,159,128,136,177,178,176,142,152,173,140,  0,  0,  0,  0,
 ];
 
+/// Outcome of resolving one HID usage at one modifier level.
+enum Resolved {
+    /// The key produces this text.
+    Text(String),
+    /// A definitive empty result (e.g. a deadkey, which only combines with
+    /// the next keypress) — not a failure, so callers must not fall back to
+    /// another keymap source expecting a better answer. Carries the
+    /// deadkey's own display glyph, or `None` for a `dead_*` keysym not in
+    /// `dead_key_glyph`'s table below.
+    Dead(Option<&'static str>),
+    /// No answer: the HID usage is unmapped in this keymap, or the
+    /// requested modifier does not exist here.
+    Unmapped,
+}
+
+/// Maps an X11 `dead_*` keysym name (without the `dead_` prefix) to the
+/// spacing glyph it conventionally shows on a keycap — what the deadkey
+/// combines with the next keypress *to produce* isn't printable on its own
+/// (a bare combining diacritic renders on top of nothing), so this is the
+/// closest single visible character, same convention most OSes/keyboard
+/// viewers use. Covers the deadkeys common on European layouts (matches
+/// `/usr/include/X11/keysymdef.h`'s `XK_dead_*` block); an unlisted one
+/// falls back to blank rather than guess.
+fn dead_key_glyph(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "circumflex" => "^",
+        "acute" => "´",
+        "grave" => "`",
+        "tilde" => "~",
+        "diaeresis" => "¨",
+        "caron" => "ˇ",
+        "cedilla" => "¸",
+        "ogonek" => "˛",
+        "breve" => "˘",
+        "abovering" => "˚",
+        "doubleacute" => "˝",
+        "macron" => "¯",
+        "abovedot" => "˙",
+        "belowdot" => ".",
+        "stroke" => "/",
+        "currency" => "¤",
+        _ => return None,
+    })
+}
+
 /// A parsed XKB keymap with a reusable probe `State`. One state per keymap is
 /// cheaper than one per resolve call. Both types wrap raw C pointers and are
 /// `!Send`, thus they live in thread-local storage.
@@ -94,33 +139,47 @@ impl Xkb {
         }
     }
 
-    /// Resolves a HID usage ID. Returns `None` when the usage is unmapped,
-    /// when the requested modifier does not exist in this keymap, or when the
-    /// key produces no character.
-    fn resolve(&mut self, hid_usage: u16, modifier: Modifier) -> Option<String> {
-        let evdev = *HID_TO_EVDEV.get(usize::from(hid_usage))?;
+    /// Resolves a HID usage ID.
+    fn resolve(&mut self, hid_usage: u16, modifier: Modifier) -> Resolved {
+        let Some(&evdev) = HID_TO_EVDEV.get(usize::from(hid_usage)) else {
+            return Resolved::Unmapped;
+        };
         if evdev == 0 {
-            return None;
+            return Resolved::Unmapped;
         }
         // libxkbcommon uses X11-style keycodes even for Wayland keymaps, and
         // X11 keycodes are evdev keycodes + 8 (X11 reserves keycodes 0-7).
         let keycode = xkb::Keycode::new(u32::from(evdev) + 8);
 
         let mask = match modifier {
-            Modifier::Base => 0,
-            Modifier::Shift => 1 << self.mod_index(xkb::MOD_NAME_SHIFT)?,
+            Modifier::Base => Some(0),
+            Modifier::Shift => self.mod_index(xkb::MOD_NAME_SHIFT).map(|i| 1 << i),
             // Level-3 shift: virtual modifier name, "Mod5" as fallback.
-            Modifier::RAlt => 1 << self.level3_index()?,
+            Modifier::RAlt => self.level3_index().map(|i| 1 << i),
             // Level-3 shift plus Shift.
-            Modifier::ShiftRAlt => {
-                (1 << self.mod_index(xkb::MOD_NAME_SHIFT)?) | (1 << self.level3_index()?)
-            }
+            Modifier::ShiftRAlt => self
+                .mod_index(xkb::MOD_NAME_SHIFT)
+                .zip(self.level3_index())
+                .map(|(shift, ralt)| (1 << shift) | (1 << ralt)),
+        };
+        let Some(mask) = mask else {
+            return Resolved::Unmapped;
         };
         // Always write the whole mask so a previous probe's Shift/RAlt does
         // not leak into this one.
         self.state.update_mask(mask, 0, 0, 0, 0, 0);
         let text = self.state.key_get_utf8(keycode);
-        (!text.is_empty()).then_some(text)
+        if !text.is_empty() {
+            return Resolved::Text(text);
+        }
+        // A deadkey alone produces no text (it only combines with the next
+        // keypress) — that empty result is correct, not a failed lookup, so
+        // callers must not treat it the same as `Unmapped`.
+        let name = xkb::keysym_get_name(self.state.key_get_one_sym(keycode));
+        match name.strip_prefix("dead_") {
+            Some(suffix) => Resolved::Dead(dead_key_glyph(suffix)),
+            None => Resolved::Unmapped,
+        }
     }
 
     fn mod_index(&self, name: &str) -> Option<u32> {
@@ -270,21 +329,28 @@ fn wait_for_keymap_text() -> Option<String> {
     None
 }
 
-fn resolve_wayland(hid_usage: u16, modifier: Modifier) -> Option<String> {
-    let keymap_text = wait_for_keymap_text()?;
+fn resolve_wayland(hid_usage: u16, modifier: Modifier) -> Resolved {
+    let Some(keymap_text) = wait_for_keymap_text() else {
+        return Resolved::Unmapped;
+    };
     PARSED_KEYMAP.with(|cell| {
         let mut cache = cell.borrow_mut();
         if cache.as_ref().is_none_or(|(text, _)| text != &keymap_text) {
             let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-            let keymap = xkb::Keymap::new_from_string(
+            let Some(keymap) = xkb::Keymap::new_from_string(
                 &context,
                 keymap_text.clone(),
                 xkb::KEYMAP_FORMAT_TEXT_V1,
                 xkb::KEYMAP_COMPILE_NO_FLAGS,
-            )?;
+            ) else {
+                return Resolved::Unmapped;
+            };
             *cache = Some((keymap_text, Xkb::new(keymap)));
         }
-        cache.as_mut()?.1.resolve(hid_usage, modifier)
+        let Some((_, xkb)) = cache.as_mut() else {
+            return Resolved::Unmapped;
+        };
+        xkb.resolve(hid_usage, modifier)
     })
 }
 
@@ -303,15 +369,15 @@ thread_local! {
     static KEYMAP: RefCell<Option<Option<Xkb>>> = const { RefCell::new(None) };
 }
 
-fn resolve_x11(hid_usage: u16, modifier: Modifier) -> Option<String> {
+fn resolve_x11(hid_usage: u16, modifier: Modifier) -> Resolved {
     KEYMAP.with(|cell| {
         if cell.borrow().is_none() {
             *cell.borrow_mut() = Some(build_keymap().map(Xkb::new));
         }
-        cell.borrow_mut()
-            .as_mut()?
-            .as_mut()?
-            .resolve(hid_usage, modifier)
+        match cell.borrow_mut().as_mut() {
+            Some(Some(xkb)) => xkb.resolve(hid_usage, modifier),
+            _ => Resolved::Unmapped,
+        }
     })
 }
 
@@ -359,15 +425,48 @@ fn build_keymap() -> Option<xkb::Keymap> {
     )
 }
 
-pub fn resolve(hid_usage: u16, modifier: Modifier) -> Option<String> {
+fn resolve_inner(hid_usage: u16, modifier: Modifier) -> Resolved {
     // The compositor keymap is the primary source. Thus a session with
     // WAYLAND_DISPLAY set tries Wayland first; X11 (XWayland) stays as a
-    // backup.
+    // fallback — but only for a genuinely inconclusive result
+    // (`Resolved::Unmapped`). A deadkey's real empty answer
+    // (`Resolved::Dead`) must not be second-guessed by X11's keymap, which
+    // is unreliable in a Wayland session (its `_XKB_RULES_NAMES` property
+    // is not kept in sync with the compositor's active layout).
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        resolve_wayland(hid_usage, modifier).or_else(|| resolve_x11(hid_usage, modifier))
+        match resolve_wayland(hid_usage, modifier) {
+            Resolved::Unmapped => resolve_x11(hid_usage, modifier),
+            other => other,
+        }
     } else {
-        resolve_x11(hid_usage, modifier).or_else(|| resolve_wayland(hid_usage, modifier))
+        match resolve_x11(hid_usage, modifier) {
+            Resolved::Unmapped => resolve_wayland(hid_usage, modifier),
+            other => other,
+        }
     }
+}
+
+pub fn resolve(hid_usage: u16, modifier: Modifier) -> Option<String> {
+    match resolve_inner(hid_usage, modifier) {
+        Resolved::Text(text) => Some(text),
+        // A recognized deadkey resolves to its own display glyph (e.g. "^"
+        // for dead_circumflex) — an unrecognized one and a true non-answer
+        // both fall back to the caller's static table via `None`.
+        Resolved::Dead(glyph) => glyph.map(str::to_string),
+        Resolved::Unmapped => None,
+    }
+}
+
+/// True when the live OS layout says this key is a deadkey at this modifier
+/// level with no known display glyph (see `dead_key_glyph`) — a real,
+/// definitive answer, distinct from `resolve` returning `None` because
+/// nothing could be determined at all. Callers that fall back to a static
+/// per-language table on `None` need this to tell "OS gave no opinion, use
+/// the static guess" apart from "OS says: no character here", which the
+/// static table's guess would just as wrongly override. A *recognized*
+/// deadkey doesn't need this — `resolve` already returns its glyph.
+pub fn is_dead(hid_usage: u16, modifier: Modifier) -> bool {
+    matches!(resolve_inner(hid_usage, modifier), Resolved::Dead(None))
 }
 
 #[cfg(test)]
@@ -394,5 +493,17 @@ mod tests {
     fn live_german_shift_matches_actual_layout() {
         assert_eq!(resolve(0x1F, Modifier::Shift).as_deref(), Some("\"")); // KC_2
         assert_eq!(resolve(0x24, Modifier::Shift).as_deref(), Some("/")); // KC_7
+    }
+
+    // Regression test for the deadkey mislabeling bug: circumflex (KC_GRV)
+    // and acute (KC_EQL) are deadkeys on the German base layer and must
+    // resolve to `None` — not the X11 fallback's wrong US-layout guess
+    // (previously "." and "=", see keypeek-deadkey-bug memory).
+    #[test]
+    #[ignore]
+    fn live_german_deadkeys_are_not_mislabeled() {
+        // Was ".", "=" (X11 fallback's US-layout guess) before the fix.
+        assert_eq!(resolve(0x35, Modifier::Base).as_deref(), Some("^")); // KC_GRV: circumflex deadkey
+        assert_eq!(resolve(0x2E, Modifier::Base).as_deref(), Some("´")); // KC_EQL: acute deadkey
     }
 }

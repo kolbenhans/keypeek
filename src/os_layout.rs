@@ -57,6 +57,20 @@ pub fn resolve(_hid_usage: u16, _modifier: Modifier) -> Option<String> {
     None
 }
 
+/// True when the live OS layout says this key is a deadkey at this modifier
+/// level (only meaningful on Linux for now — see `linux::is_dead`). Other
+/// platforms report `false`: `resolve` returning `None` there already means
+/// "no opinion", so callers keep falling back to the static table as before.
+#[cfg(target_os = "linux")]
+pub fn is_dead(hid_usage: u16, modifier: Modifier) -> bool {
+    linux::is_dead(hid_usage, modifier)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn is_dead(_hid_usage: u16, _modifier: Modifier) -> bool {
+    false
+}
+
 /// Helper for the `shifted` legend field.
 pub fn shifted_char(hid_usage: u16) -> Option<String> {
     resolve(hid_usage, Modifier::Shift)

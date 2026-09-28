@@ -49,9 +49,16 @@ pub fn apply_os_overrides(key: &mut LayoutKey, usage_id: u16) {
                 return;
             }
             key.tap = Label::new(base.clone());
+        } else if crate::os_layout::is_dead(usage_id, crate::os_layout::Modifier::Base) {
+            // A deadkey alone has no character of its own to show — the
+            // static table's US-layout guess (e.g. "`") would be just as
+            // wrong here as the character it replaces.
+            key.tap = Label::new("");
         }
         if let Some(shifted) = os_shifted {
             key.shifted = Some(shifted);
+        } else if crate::os_layout::is_dead(usage_id, crate::os_layout::Modifier::Shift) {
+            key.shifted = None;
         }
         // RAlt's result, for the Single-legend live preview.
         key.ralt = crate::os_layout::ralt_char(usage_id);
