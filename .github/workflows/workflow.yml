@@ -126,8 +126,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Pinned: cargo-bundle 0.12.0 restructured [package.metadata.bundle]'s
+      # macOS keys (osx_info_plist_exts -> unknown field), breaking the
+      # build against our manifest. 0.11.0 is the last version that still
+      # accepts our flat osx_* keys.
       - name: Install bundle tool
-        run: cargo install cargo-bundle
+        run: cargo install cargo-bundle --version 0.11.0
 
       - name: Build app bundle
         run: cargo bundle --release --target ${{ matrix.target }}
