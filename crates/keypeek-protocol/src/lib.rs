@@ -9,9 +9,11 @@ pub mod platform {
     pub mod hid;
     #[cfg(target_arch = "wasm32")]
     pub mod web;
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub mod web_ble;
+    #[cfg(any(target_arch = "wasm32", test))]
     pub mod web_hid;
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     pub mod web_serial;
 }
 pub mod protocols;

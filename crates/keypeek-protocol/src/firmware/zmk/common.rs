@@ -224,6 +224,29 @@ pub fn snapshot_from_resolved(resolved: &[ResolvedLayer], num_keys: usize) -> Ke
     KeymapSnapshot { layers, actions }
 }
 
+/// Checks whether a HID product name and a BLE local/display name likely refer to the same keyboard.
+pub fn is_possible_ble_name_match(hid_name: &str, ble_name: &str) -> bool {
+    let hid_name = hid_name.to_ascii_lowercase();
+    let ble_name = ble_name.to_ascii_lowercase();
+    if hid_name.is_empty() || ble_name.is_empty() {
+        return false;
+    }
+
+    if hid_name.contains(&ble_name) || ble_name.contains(&hid_name) {
+        return true;
+    }
+
+    let hid_norm = normalize_name_for_match(&hid_name);
+    let ble_norm = normalize_name_for_match(&ble_name);
+    !hid_norm.is_empty()
+        && !ble_norm.is_empty()
+        && (hid_norm.contains(&ble_norm) || ble_norm.contains(&hid_norm))
+}
+
+fn normalize_name_for_match(name: &str) -> String {
+    name.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

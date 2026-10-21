@@ -101,25 +101,7 @@ impl DeviceDriverScanner for ZmkScanner {
 }
 
 pub fn is_possible_ble_match(hid: &HidDeviceInfo, ble_name: &str) -> bool {
-    let hid_name = hid
-        .product
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let ble_name = ble_name.to_ascii_lowercase();
-    if hid_name.is_empty() || ble_name.is_empty() {
-        return false;
-    }
-
-    if hid_name.contains(&ble_name) || ble_name.contains(&hid_name) {
-        return true;
-    }
-
-    let hid_norm = normalize_name_for_match(&hid_name);
-    let ble_norm = normalize_name_for_match(&ble_name);
-    !hid_norm.is_empty()
-        && !ble_norm.is_empty()
-        && (hid_norm.contains(&ble_norm) || ble_norm.contains(&hid_norm))
+    super::common::is_possible_ble_name_match(hid.product.as_deref().unwrap_or_default(), ble_name)
 }
 
 pub fn find_matching_hid_for_ble<'a>(
@@ -136,10 +118,6 @@ pub fn find_matching_hid_for_ble<'a>(
                 .iter()
                 .find(|d| d.usage_page == VIA_USAGE_PAGE && is_possible_ble_match(d, ble_name))
         })
-}
-
-fn normalize_name_for_match(name: &str) -> String {
-    name.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }
 
 #[cfg(test)]

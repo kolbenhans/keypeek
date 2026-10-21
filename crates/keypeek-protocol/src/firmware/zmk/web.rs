@@ -2,8 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::sync::Arc;
 
+use crate::device_discovery::DiscoveredDevice;
+use crate::platform::web::ConnectedWebDevice;
+use crate::platform::web_ble::WebBleTransport;
+use crate::platform::web_hid::{PendingZmkTelemetry, WebConnectOutcome, WebHidTransport};
 use crate::platform::web_serial::WebSerialTransport;
-use crate::protocols::{DeviceError, DeviceEvent};
+use crate::protocols::{ConnectionSpec, DeviceError, DeviceEvent, ZmkTransportConfig};
+use crate::ui_wake::UiWake;
+use keypeek_core::OverlayConfig;
 
 use super::common::{build_from_zmk_data, resolve_binding, ZmkData};
 
@@ -13,8 +19,31 @@ use zmk_studio_api::proto::zmk::keymap::{Keymap, PhysicalLayouts};
 use zmk_studio_api::proto::zmk::studio;
 use zmk_studio_api::{role_from_display_name, ResolvedLayer};
 
-/// Queries the ZMK Studio lock state over Web Serial.
-async fn query_lock_state(transport: &WebSerialTransport) -> Result<LockState, DeviceError> {
+/// Unified browser transport for ZMK Studio RPC communication across Web Serial,
+/// Web Bluetooth (GATT), and WebHID (Raw HID `0xFF60` companion tunnel).
+#[derive(Clone)]
+pub enum WebZmkTransport {
+    Serial(Arc<WebSerialTransport>),
+    Ble(Arc<WebBleTransport>),
+    Hid(Arc<WebHidTransport>),
+}
+
+impl WebZmkTransport {
+    /// Sends a ZMK Studio RPC request over the active browser transport and awaits the response.
+    pub async fn call(
+        &self,
+        subsystem: studio::request::Subsystem,
+    ) -> Result<studio::RequestResponse, DeviceError> {
+        match self {
+            Self::Serial(serial) => serial.call(subsystem).await,
+            Self::Ble(ble) => ble.call(subsystem).await,
+            Self::Hid(hid) => hid.call_zmk(subsystem).await,
+        }
+    }
+}
+
+/// Queries the ZMK Studio lock state over a browser transport.
+async fn query_lock_state(transport: &WebZmkTransport) -> Result<LockState, DeviceError> {
     let req = studio::request::Subsystem::Core(zmk_studio_api::proto::zmk::core::Request {
         request_type: Some(
             zmk_studio_api::proto::zmk::core::request::RequestType::GetLockState(true),
@@ -38,9 +67,9 @@ async fn query_lock_state(transport: &WebSerialTransport) -> Result<LockState, D
     }
 }
 
-/// Queries physical layout definitions over Web Serial.
+/// Queries physical layout definitions over a browser transport.
 async fn query_physical_layouts(
-    transport: &WebSerialTransport,
+    transport: &WebZmkTransport,
 ) -> Result<PhysicalLayouts, DeviceError> {
     let req = studio::request::Subsystem::Keymap(zmk_studio_api::proto::zmk::keymap::Request {
         request_type: Some(
@@ -67,8 +96,8 @@ async fn query_physical_layouts(
     }
 }
 
-/// Queries keymap layers and bindings over Web Serial.
-async fn query_keymap(transport: &WebSerialTransport) -> Result<Keymap, DeviceError> {
+/// Queries keymap layers and bindings over a browser transport.
+async fn query_keymap(transport: &WebZmkTransport) -> Result<Keymap, DeviceError> {
     let req = studio::request::Subsystem::Keymap(zmk_studio_api::proto::zmk::keymap::Request {
         request_type: Some(
             zmk_studio_api::proto::zmk::keymap::request::RequestType::GetKeymap(true),
@@ -93,7 +122,7 @@ async fn query_keymap(transport: &WebSerialTransport) -> Result<Keymap, DeviceEr
 }
 
 /// Queries all behavior IDs available on the device.
-async fn query_all_behaviors(transport: &WebSerialTransport) -> Result<Vec<u32>, DeviceError> {
+async fn query_all_behaviors(transport: &WebZmkTransport) -> Result<Vec<u32>, DeviceError> {
     let req =
         studio::request::Subsystem::Behaviors(zmk_studio_api::proto::zmk::behaviors::Request {
             request_type: Some(
@@ -122,7 +151,7 @@ async fn query_all_behaviors(transport: &WebSerialTransport) -> Result<Vec<u32>,
 
 /// Queries behavior details (name and parameter metadata) for a given behavior ID.
 async fn query_behavior_details(
-    transport: &WebSerialTransport,
+    transport: &WebZmkTransport,
     behavior_id: u32,
 ) -> Result<GetBehaviorDetailsResponse, DeviceError> {
     let req =
@@ -157,13 +186,14 @@ async fn query_behavior_details(
 
 pub use super::driver::ZmkProtocol;
 
-/// Connects to a ZMK Studio keyboard over Web Serial, performs handshake and keymap resolution.
+/// Connects to a ZMK Studio keyboard over any browser transport (Web Serial, Web Bluetooth, or WebHID),
+/// performs handshake and keymap resolution.
 pub async fn connect_web_zmk(
-    transport: Arc<WebSerialTransport>,
+    transport: WebZmkTransport,
     vid: u16,
     pid: u16,
     event_rx: mpsc::Receiver<DeviceEvent>,
-    telemetry_hid: Option<crate::platform::web_hid::WebHidTransport>,
+    telemetry_hid: Option<WebHidTransport>,
 ) -> Result<ZmkProtocol, DeviceError> {
     let lock_state = query_lock_state(&transport).await?;
     if lock_state == LockState::ZmkStudioCoreLockStateLocked {
@@ -232,4 +262,40 @@ pub async fn connect_web_zmk(
     ));
 
     Ok(ZmkProtocol::new_web(Arc::new(layout), backend, event_rx))
+}
+
+/// Completes a ZMK browser connection by resolving keymap data and assembling the [`WebConnectOutcome`].
+#[allow(clippy::too_many_arguments)]
+pub async fn finish_zmk_web_connection(
+    transport: WebZmkTransport,
+    base_name: String,
+    vid: u16,
+    pid: u16,
+    protocol_label: &'static str,
+    transport_spec: ZmkTransportConfig,
+    event_rx: mpsc::Receiver<DeviceEvent>,
+    telemetry_hid: Option<WebHidTransport>,
+    pending_telemetry: Option<PendingZmkTelemetry>,
+    overlay_config: OverlayConfig,
+    ui_wake: UiWake,
+) -> Result<WebConnectOutcome, DeviceError> {
+    let protocol = connect_web_zmk(transport, vid, pid, event_rx, telemetry_hid).await?;
+    let discovered = DiscoveredDevice {
+        base_name,
+        vid,
+        pid,
+        driver_id: "zmk",
+        protocol_label,
+        requires_layout_file: false,
+        spec: ConnectionSpec::Zmk {
+            vid,
+            pid,
+            transport: transport_spec,
+        },
+    };
+    let connected = ConnectedWebDevice::new(discovered, protocol, overlay_config, ui_wake)?;
+    Ok(WebConnectOutcome::ZmkConnected {
+        connected,
+        pending_telemetry,
+    })
 }

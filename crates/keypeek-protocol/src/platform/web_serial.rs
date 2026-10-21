@@ -1,44 +1,168 @@
-//! Web Serial transport adapter for ZMK Studio keyboards in browser environments.
+//! Web Serial transport adapter and shared ZMK RPC stream multiplexer for browser environments.
 
 #[cfg(target_arch = "wasm32")]
 use crate::protocols::DeviceError;
-#[cfg(target_arch = "wasm32")]
+use crate::protocols::DeviceEvent;
 use crate::ui_wake::UiWake;
 #[cfg(target_arch = "wasm32")]
 use keypeek_core::OverlayConfig;
-#[cfg(target_arch = "wasm32")]
 use std::collections::HashMap;
+#[cfg(target_arch = "wasm32")]
+use std::future::Future;
 #[cfg(target_arch = "wasm32")]
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 #[cfg(target_arch = "wasm32")]
-use std::sync::{Arc, Mutex};
-
-use crate::protocols::DeviceEvent;
+use std::sync::Arc;
+use std::sync::{mpsc, Mutex};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
-#[cfg(target_arch = "wasm32")]
 use zmk_studio_api::framing::FrameDecoder;
 use zmk_studio_api::proto::zmk::studio;
 
-/// Async timer utility that resolves after `ms` milliseconds using browser setTimeout.
-#[cfg(target_arch = "wasm32")]
-pub async fn sleep_ms(ms: i32) {
-    let promise = js_sys::Promise::new(&mut |resolve, _| {
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+pub type ZmkResponseMap = HashMap<u32, futures_channel::oneshot::Sender<studio::RequestResponse>>;
+
+/// Demuxed frame from the ZMK stream: either a ZMK Studio RPC response or a companion telemetry event.
+#[derive(Debug, PartialEq)]
+pub enum DemuxedSerialFrame {
+    Response(studio::Response),
+    Event(DeviceEvent),
+}
+
+/// Demuxes a SLIP-decoded frame from a ZMK stream:
+/// - If it is a valid ZMK Studio protobuf response, returns `Some(DemuxedSerialFrame::Response)`.
+/// - If it is a companion telemetry packet (0xFF / 0xF1), returns `Some(DemuxedSerialFrame::Event)`.
+/// - Otherwise returns `None`.
+pub fn demux_serial_frame(frame: &[u8]) -> Option<DemuxedSerialFrame> {
+    if let Ok(response) = prost::Message::decode(frame) {
+        Some(DemuxedSerialFrame::Response(response))
+    } else {
+        crate::protocols::decode_raw_hid_packet(frame).map(DemuxedSerialFrame::Event)
+    }
+}
+
+/// Shared ZMK Studio RPC stream state and multiplexer used across Web Serial, Web Bluetooth, and WebHID.
+pub struct ZmkRpcMux {
+    decoder: Mutex<FrameDecoder>,
+    #[cfg(target_arch = "wasm32")]
+    next_request_id: AtomicU32,
+    pending_requests: Mutex<ZmkResponseMap>,
+}
+
+impl Default for ZmkRpcMux {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ZmkRpcMux {
+    pub fn new() -> Self {
+        Self {
+            decoder: Mutex::new(FrameDecoder::new()),
+            #[cfg(target_arch = "wasm32")]
+            next_request_id: AtomicU32::new(1),
+            pending_requests: Mutex::new(HashMap::new()),
         }
-    });
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+
+    /// Feeds incoming raw stream bytes into the SLIP [`FrameDecoder`] and dispatches
+    /// completed RPC responses and telemetry events.
+    pub fn push_bytes(&self, chunk: &[u8], event_tx: &mpsc::Sender<DeviceEvent>, ui_wake: &UiWake) {
+        let frames = self.decoder.lock().unwrap().push(chunk);
+        for frame in frames {
+            match demux_serial_frame(&frame) {
+                Some(DemuxedSerialFrame::Response(response)) => match response.r#type {
+                    Some(studio::response::Type::RequestResponse(rr)) => {
+                        if let Some(tx) =
+                            self.pending_requests.lock().unwrap().remove(&rr.request_id)
+                        {
+                            let _ = tx.send(rr);
+                        }
+                    }
+                    Some(studio::response::Type::Notification(_)) => {
+                        ui_wake.request_repaint();
+                    }
+                    None => {}
+                },
+                Some(DemuxedSerialFrame::Event(event)) => {
+                    let _ = event_tx.send(event);
+                    ui_wake.request_repaint();
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Registers a pending request channel for unit tests or custom callers.
+    pub fn register_pending(
+        &self,
+        request_id: u32,
+        tx: futures_channel::oneshot::Sender<studio::RequestResponse>,
+    ) {
+        self.pending_requests.lock().unwrap().insert(request_id, tx);
+    }
+
+    /// Clears all pending request channels (e.g. on disconnect or close).
+    pub fn clear_pending(&self) {
+        self.pending_requests.lock().unwrap().clear();
+    }
+
+    /// Encodes a ZMK Studio RPC request, sends it via `send_fn`, and awaits the matching
+    /// [`studio::RequestResponse`] with automatic retries and timeout.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn call<'a, F, Fut>(
+        &'a self,
+        subsystem: studio::request::Subsystem,
+        max_attempts: usize,
+        timeout_ms: i32,
+        mut send_fn: F,
+    ) -> Result<studio::RequestResponse, DeviceError>
+    where
+        F: FnMut(Vec<u8>) -> Fut,
+        Fut: Future<Output = Result<(), DeviceError>>,
+    {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
+        let request = studio::Request {
+            request_id,
+            subsystem: Some(subsystem),
+        };
+        let bytes = zmk_studio_api::protocol::encode_request(&request);
+
+        for attempt in 1..=max_attempts {
+            let (tx, rx) = futures_channel::oneshot::channel();
+            self.pending_requests.lock().unwrap().insert(request_id, tx);
+
+            if let Err(e) = send_fn(bytes.clone()).await {
+                self.pending_requests.lock().unwrap().remove(&request_id);
+                return Err(e);
+            }
+
+            use futures_util::future::{select, Either};
+            match select(rx, Box::pin(super::web::sleep_ms(timeout_ms))).await {
+                Either::Left((Ok(response), _)) => return Ok(response),
+                Either::Left((Err(_), _)) => {
+                    return Err(DeviceError::Transport("ZMK RPC channel closed".into()));
+                }
+                Either::Right(_) => {
+                    log::warn!(
+                        "ZMK RPC request {request_id} timed out on attempt {attempt}/{max_attempts}"
+                    );
+                    self.pending_requests.lock().unwrap().remove(&request_id);
+                }
+            }
+        }
+
+        Err(DeviceError::Transport(format!(
+            "Timed out waiting for response to ZMK RPC request {request_id}"
+        )))
+    }
 }
 
 /// Returns whether the current browser environment supports the Web Serial API.
 #[cfg(target_arch = "wasm32")]
 pub fn is_web_serial_supported() -> bool {
-    web_sys::window()
-        .and_then(|w| js_sys::Reflect::has(&w.navigator(), &JsValue::from_str("serial")).ok())
-        .unwrap_or(false)
+    super::web::has_navigator_property("serial")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -79,19 +203,14 @@ pub async fn request_web_serial_port() -> Result<Option<web_sys::SerialPort>, De
     }
 
     let serial = window.navigator().serial();
-    let promise = serial.request_port();
-    let port_val = match wasm_bindgen_futures::JsFuture::from(promise).await {
+    let port_val = match wasm_bindgen_futures::JsFuture::from(serial.request_port()).await {
         Ok(val) => val,
         Err(err) => {
-            let err_str = format!("{err:?}");
-            if err_str.contains("AbortError")
-                || err_str.contains("cancel")
-                || err_str.contains("user did not select")
-            {
+            if super::web::is_user_cancelled_picker(&err) {
                 return Ok(None);
             }
             return Err(DeviceError::Transport(format!(
-                "Web Serial request error: {err_str}"
+                "Web Serial request error: {err:?}"
             )));
         }
     };
@@ -100,10 +219,8 @@ pub async fn request_web_serial_port() -> Result<Option<web_sys::SerialPort>, De
         .dyn_into()
         .map_err(|e| DeviceError::Transport(format!("Expected SerialPort: {e:?}")))?;
 
-    // Open port with 115200 baud rate (standard CDC-ACM virtual serial port)
     let options = web_sys::SerialOptions::new(115_200);
-    let open_promise = port.open(&options);
-    if let Err(e) = wasm_bindgen_futures::JsFuture::from(open_promise).await {
+    if let Err(e) = wasm_bindgen_futures::JsFuture::from(port.open(&options)).await {
         let err_str = format!("{e:?}");
         if !err_str.contains("already open") {
             return Err(DeviceError::Transport(format!(
@@ -115,37 +232,14 @@ pub async fn request_web_serial_port() -> Result<Option<web_sys::SerialPort>, De
     Ok(Some(port))
 }
 
-#[cfg(target_arch = "wasm32")]
-type ResponseMap = HashMap<u32, futures_channel::oneshot::Sender<studio::RequestResponse>>;
-
 /// Web Serial transport for ZMK Studio RPC communication in WebAssembly.
 #[cfg(target_arch = "wasm32")]
 pub struct WebSerialTransport {
     port: web_sys::SerialPort,
     reader: web_sys::ReadableStreamDefaultReader,
     alive: Arc<AtomicBool>,
-    next_request_id: AtomicU32,
-    pending_requests: Arc<Mutex<ResponseMap>>,
+    rpc: Arc<ZmkRpcMux>,
     _ui_wake: UiWake,
-}
-
-/// Demuxed frame from the serial stream: either a ZMK Studio RPC response or a companion telemetry event.
-#[derive(Debug, PartialEq)]
-pub enum DemuxedSerialFrame {
-    Response(studio::Response),
-    Event(DeviceEvent),
-}
-
-/// Demuxes a SLIP-decoded frame from the serial stream:
-/// - If it is a valid ZMK Studio protobuf response, returns `Some(DemuxedSerialFrame::Response)`.
-/// - If it is a companion telemetry packet (0xFF / 0xF1), returns `Some(DemuxedSerialFrame::Event)`.
-/// - Otherwise returns `None`.
-pub fn demux_serial_frame(frame: &[u8]) -> Option<DemuxedSerialFrame> {
-    if let Ok(response) = prost::Message::decode(frame) {
-        Some(DemuxedSerialFrame::Response(response))
-    } else {
-        crate::protocols::decode_raw_hid_packet(frame).map(DemuxedSerialFrame::Event)
-    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -156,33 +250,26 @@ unsafe impl Sync for WebSerialTransport {}
 #[cfg(target_arch = "wasm32")]
 impl WebSerialTransport {
     /// Creates a new `WebSerialTransport` wrapping an opened `web_sys::SerialPort`.
-    ///
-    /// Spawns a background read loop that demuxes responses using ZMK Studio framing
-    /// and delivers decoded RPC responses and telemetry events into `event_tx`.
     pub fn new(
         port: web_sys::SerialPort,
-        event_tx: std::sync::mpsc::Sender<DeviceEvent>,
+        event_tx: mpsc::Sender<DeviceEvent>,
         ui_wake: UiWake,
     ) -> Result<Self, DeviceError> {
         let alive = Arc::new(AtomicBool::new(true));
-        let next_request_id = AtomicU32::new(1);
-        let pending_requests: Arc<Mutex<ResponseMap>> = Arc::new(Mutex::new(HashMap::new()));
+        let rpc = Arc::new(ZmkRpcMux::new());
 
-        let readable = port.readable();
-        let reader: web_sys::ReadableStreamDefaultReader = readable.get_reader().unchecked_into();
+        let reader: web_sys::ReadableStreamDefaultReader =
+            port.readable().get_reader().unchecked_into();
 
         let reader_alive = Arc::clone(&alive);
-        let reader_pending = Arc::clone(&pending_requests);
+        let reader_rpc = Arc::clone(&rpc);
         let wake_clone = ui_wake.clone();
-        let event_tx_clone = event_tx;
         let reader_for_loop = reader.clone();
         let port_for_loop = port.clone();
 
         wasm_bindgen_futures::spawn_local(async move {
-            let mut decoder = FrameDecoder::new();
             while reader_alive.load(Ordering::Relaxed) {
-                let promise = reader_for_loop.read();
-                match wasm_bindgen_futures::JsFuture::from(promise).await {
+                match wasm_bindgen_futures::JsFuture::from(reader_for_loop.read()).await {
                     Ok(result) => {
                         let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
                             .ok()
@@ -198,34 +285,7 @@ impl WebSerialTransport {
                                 let uint8_arr: js_sys::Uint8Array = value.unchecked_into();
                                 let mut chunk = vec![0u8; uint8_arr.length() as usize];
                                 uint8_arr.copy_to(&mut chunk);
-                                let frames = decoder.push(&chunk);
-                                for frame in frames {
-                                    match demux_serial_frame(&frame) {
-                                        Some(DemuxedSerialFrame::Response(response)) => {
-                                            match response.r#type {
-                                                Some(studio::response::Type::RequestResponse(
-                                                    rr,
-                                                )) => {
-                                                    let mut pending =
-                                                        reader_pending.lock().unwrap();
-                                                    if let Some(tx) = pending.remove(&rr.request_id)
-                                                    {
-                                                        let _ = tx.send(rr);
-                                                    }
-                                                }
-                                                Some(studio::response::Type::Notification(_n)) => {
-                                                    wake_clone.request_repaint();
-                                                }
-                                                None => {}
-                                            }
-                                        }
-                                        Some(DemuxedSerialFrame::Event(event)) => {
-                                            let _ = event_tx_clone.send(event);
-                                            wake_clone.request_repaint();
-                                        }
-                                        None => {}
-                                    }
-                                }
+                                reader_rpc.push_bytes(&chunk, &event_tx, &wake_clone);
                             }
                         }
                     }
@@ -236,16 +296,14 @@ impl WebSerialTransport {
                 }
             }
             reader_for_loop.release_lock();
-            let close_promise = port_for_loop.close();
-            let _ = wasm_bindgen_futures::JsFuture::from(close_promise).await;
+            let _ = wasm_bindgen_futures::JsFuture::from(port_for_loop.close()).await;
         });
 
         Ok(Self {
             port,
             reader,
             alive,
-            next_request_id,
-            pending_requests,
+            rpc,
             _ui_wake: ui_wake,
         })
     }
@@ -257,15 +315,14 @@ impl WebSerialTransport {
 
     /// Asynchronously sends raw framed bytes to the serial port.
     async fn send_bytes(&self, data: &[u8]) -> Result<(), DeviceError> {
-        let writable = self.port.writable();
-        let writer = writable
-            .get_writer()
-            .map_err(|e| DeviceError::Transport(format!("Failed to get serial writer: {e:?}")))?;
+        let writer =
+            self.port.writable().get_writer().map_err(|e| {
+                DeviceError::Transport(format!("Failed to get serial writer: {e:?}"))
+            })?;
 
         let chunk = js_sys::Uint8Array::new_with_length(data.len() as u32);
         chunk.copy_from(data);
-        let promise = writer.write_with_chunk(&chunk);
-        let res = wasm_bindgen_futures::JsFuture::from(promise).await;
+        let res = wasm_bindgen_futures::JsFuture::from(writer.write_with_chunk(&chunk)).await;
         writer.release_lock();
 
         res.map_err(|e| DeviceError::Transport(format!("Failed to write to serial port: {e:?}")))?;
@@ -277,47 +334,17 @@ impl WebSerialTransport {
         &self,
         subsystem: studio::request::Subsystem,
     ) -> Result<studio::RequestResponse, DeviceError> {
-        let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
-        let request = studio::Request {
-            request_id,
-            subsystem: Some(subsystem),
-        };
-        let bytes = zmk_studio_api::protocol::encode_request(&request);
-
-        const MAX_ATTEMPTS: usize = 3;
-        const TIMEOUT_MS: i32 = 1500;
-
-        for attempt in 1..=MAX_ATTEMPTS {
-            let (tx, rx) = futures_channel::oneshot::channel();
-            self.pending_requests.lock().unwrap().insert(request_id, tx);
-
-            self.send_bytes(&bytes).await?;
-
-            use futures_util::future::{select, Either};
-            match select(rx, Box::pin(sleep_ms(TIMEOUT_MS))).await {
-                Either::Left((Ok(response), _)) => {
-                    return Ok(response);
-                }
-                Either::Left((Err(_), _)) => {
-                    return Err(DeviceError::Transport("Web Serial channel closed".into()));
-                }
-                Either::Right(_) => {
-                    log::warn!(
-                        "Web Serial RPC request {request_id} timed out on attempt {attempt}/{MAX_ATTEMPTS}"
-                    );
-                    self.pending_requests.lock().unwrap().remove(&request_id);
-                }
-            }
-        }
-
-        Err(DeviceError::Transport(format!(
-            "Timed out waiting for response to ZMK RPC request {request_id}"
-        )))
+        self.rpc
+            .call(subsystem, 3, 1500, |bytes| async move {
+                self.send_bytes(&bytes).await
+            })
+            .await
     }
 
     /// Cancels active serial reads and closes the underlying serial port.
     pub fn close(&self) {
         if self.alive.swap(false, Ordering::Relaxed) {
+            self.rpc.clear_pending();
             let cancel_promise = self.reader.cancel();
             wasm_bindgen_futures::spawn_local(async move {
                 let _ = wasm_bindgen_futures::JsFuture::from(cancel_promise).await;
@@ -348,14 +375,13 @@ pub async fn request_and_connect_zmk(
     let vid = vid_opt.unwrap_or(0x1D50);
     let pid = pid_opt.unwrap_or(0x615E);
 
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
     let transport = Arc::new(WebSerialTransport::new(
         port,
         event_tx.clone(),
         ui_wake.clone(),
     )?);
 
-    // Check if WebHID telemetry is already authorized for this device
     let hid_transport = crate::platform::web_hid::WebHidTransport::open_paired(
         vid,
         pid,
@@ -364,42 +390,30 @@ pub async fn request_and_connect_zmk(
     )
     .await;
 
-    let pending_telemetry = if hid_transport.is_none() {
-        Some(super::web_hid::PendingZmkTelemetry { vid, pid, event_tx })
-    } else {
-        None
-    };
+    let pending_telemetry =
+        hid_transport
+            .is_none()
+            .then_some(super::web_hid::PendingZmkTelemetry {
+                vid: vid_opt,
+                pid: pid_opt,
+                event_tx,
+            });
 
-    let protocol = crate::firmware::zmk::web::connect_web_zmk(
-        Arc::clone(&transport),
+    crate::firmware::zmk::web::finish_zmk_web_connection(
+        crate::firmware::zmk::web::WebZmkTransport::Serial(transport),
+        format!("ZMK Studio ({vid:04X}:{pid:04X})"),
         vid,
         pid,
+        "Web Serial",
+        crate::protocols::ZmkTransportConfig::Serial("WebSerial".to_string()),
         event_rx,
         hid_transport,
-    )
-    .await?;
-
-    let discovered = crate::device_discovery::DiscoveredDevice {
-        base_name: format!("ZMK Studio ({vid:04X}:{pid:04X})"),
-        vid,
-        pid,
-        driver_id: "zmk",
-        protocol_label: "Web Serial",
-        requires_layout_file: false,
-        spec: crate::protocols::ConnectionSpec::Zmk {
-            vid,
-            pid,
-            transport: crate::protocols::ZmkTransportConfig::Serial("WebSerial".to_string()),
-        },
-    };
-
-    let connected =
-        super::web::ConnectedWebDevice::new(discovered, protocol, overlay_config, ui_wake)?;
-
-    Ok(Some(super::web_hid::WebConnectOutcome::ZmkConnected {
-        connected,
         pending_telemetry,
-    }))
+        overlay_config,
+        ui_wake,
+    )
+    .await
+    .map(Some)
 }
 
 #[cfg(test)]

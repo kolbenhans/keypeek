@@ -3,7 +3,7 @@ use super::codec as zmk_codec;
 use super::rpc::{self as zmk_rpc, ZmkStudioSession, ZmkTransport};
 #[cfg(feature = "desktop")]
 use crate::protocols::pump_hid_reader;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use crate::protocols::DeviceEvent;
 #[cfg(test)]
 use crate::protocols::RawHidTransport;
@@ -101,7 +101,7 @@ impl ZmkBackend for NativeZmkBackend {
 
 #[cfg(target_arch = "wasm32")]
 pub struct WebZmkBackend {
-    transport: Arc<crate::platform::web_serial::WebSerialTransport>,
+    transport: super::web::WebZmkTransport,
     behavior_id_by_role: std::collections::HashMap<zmk_studio_api::BehaviorRole, u32>,
     /// Companion WebHID transport kept alive for live layer/press telemetry during the session.
     _telemetry_hid: Option<crate::platform::web_hid::WebHidTransport>,
@@ -110,7 +110,7 @@ pub struct WebZmkBackend {
 #[cfg(target_arch = "wasm32")]
 impl WebZmkBackend {
     pub fn new(
-        transport: Arc<crate::platform::web_serial::WebSerialTransport>,
+        transport: super::web::WebZmkTransport,
         behavior_id_by_role: std::collections::HashMap<zmk_studio_api::BehaviorRole, u32>,
         telemetry_hid: Option<crate::platform::web_hid::WebHidTransport>,
     ) -> Self {
@@ -156,7 +156,7 @@ impl ZmkBackend for WebZmkBackend {
             param2,
         };
 
-        let transport = Arc::clone(&self.transport);
+        let transport = self.transport.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let req = zmk_studio_api::proto::zmk::studio::request::Subsystem::Keymap(
                 zmk_studio_api::proto::zmk::keymap::Request {
@@ -180,7 +180,7 @@ impl ZmkBackend for WebZmkBackend {
     }
 
     fn save_changes(&mut self) -> Result<(), DeviceError> {
-        let transport = Arc::clone(&self.transport);
+        let transport = self.transport.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let req = zmk_studio_api::proto::zmk::studio::request::Subsystem::Keymap(
                 zmk_studio_api::proto::zmk::keymap::Request {

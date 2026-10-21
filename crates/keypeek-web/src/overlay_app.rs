@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -6,31 +7,40 @@ use keypeek_presentation::{
     SettingsStore,
 };
 use keypeek_protocol::connection_manager::{ConnectionEvent, ConnectionState};
-use keypeek_protocol::platform::web::ConnectedWebDevice;
+use keypeek_protocol::platform::web::{ConnectedWebDevice, OverlayConfig};
+use keypeek_protocol::platform::web_ble::{
+    is_web_bluetooth_supported, is_windows_browser, request_and_connect_zmk_ble,
+};
 use keypeek_protocol::platform::web_hid::{
     connect_via_with_layout, is_web_hid_supported, request_and_connect_device,
-    trigger_web_file_picker, PendingZmkTelemetry, WebConnectOutcome, WebHidTransport,
+    request_and_connect_zmk_hid, trigger_web_file_picker, PendingZmkTelemetry, WebConnectOutcome,
+    WebHidTransport,
 };
 use keypeek_protocol::platform::web_serial::{is_web_serial_supported, request_and_connect_zmk};
 use keypeek_protocol::{DeviceError, DiscoveredDevice, Keyboard, UiWake};
+
+/// URL to the KeyPeek companion ZMK module required for Bluetooth connections on Windows.
+const KEYPEEK_ZMK_MODULE_URL: &str = "https://github.com/srwi/zmk-keypeek-layer-notifier";
 
 /// Background color for the browser canvas, matching egui's panel background.
 pub fn clear_color(visuals: &egui::Visuals) -> egui::Rgba {
     visuals.panel_fill.into()
 }
 
-/// Top-level coordinator for browser execution: WebHID/WebSerial pairing,
+/// Top-level coordinator for browser execution: WebHID/WebSerial/WebBluetooth pairing,
 /// single-canvas layout, responsive sidebar editor, and web local storage.
 pub struct WebOverlayApp {
     pub core: KeyPeekAppCore,
 
-    pub(crate) pairing_rx: Option<mpsc::Receiver<Result<Option<WebConnectOutcome>, DeviceError>>>,
+    pub(crate) pairing_rx:
+        Option<(mpsc::Receiver<Result<Option<WebConnectOutcome>, DeviceError>>, bool)>,
     pub(crate) pending_via: Option<(DiscoveredDevice, Arc<WebHidTransport>)>,
     pub(crate) web_file_rx: Option<mpsc::Receiver<Result<(String, String), String>>>,
     pub(crate) pending_zmk_telemetry: Option<PendingZmkTelemetry>,
     pub(crate) telemetry_hid: Option<WebHidTransport>,
     pub(crate) telemetry_rx: Option<mpsc::Receiver<Option<WebHidTransport>>>,
     pub(crate) selected_layer: Option<usize>,
+    pub(crate) show_zmk_ble_windows_help_modal: bool,
 }
 
 pub type OverlayApp = WebOverlayApp;
@@ -68,6 +78,7 @@ impl WebOverlayApp {
             telemetry_hid: None,
             telemetry_rx: None,
             selected_layer: None,
+            show_zmk_ble_windows_help_modal: false,
         }
     }
 
@@ -95,6 +106,7 @@ impl WebOverlayApp {
         self.pending_zmk_telemetry = None;
         self.telemetry_hid = None;
         self.web_file_rx = None;
+        self.show_zmk_ble_windows_help_modal = false;
     }
 
     /// Web update step: polls pairing channels, telemetry channels, and file picker channels.
@@ -111,7 +123,8 @@ impl WebOverlayApp {
             }
         }
 
-        if let Some(rx) = &self.pairing_rx {
+        if let Some((rx, show_ble_help_on_cancel)) = &self.pairing_rx {
+            let show_ble_help_on_cancel = *show_ble_help_on_cancel;
             match rx.try_recv() {
                 Ok(Ok(Some(WebConnectOutcome::Connected(connected)))) => {
                     self.handle_connected_web_device(connected);
@@ -136,6 +149,9 @@ impl WebOverlayApp {
                     self.pairing_rx = None;
                     if self.connection_mgr.is_connecting() {
                         self.connection_mgr.disconnect();
+                    }
+                    if show_ble_help_on_cancel {
+                        self.show_zmk_ble_windows_help_modal = true;
                     }
                 }
                 Ok(Err(err)) => {
@@ -196,32 +212,50 @@ impl WebOverlayApp {
         self.clear_transient_web_state();
     }
 
-    /// Prompts user to pair a WebHID device.
-    pub fn request_web_hid_pairing(&mut self) {
+    /// Spawns a browser pairing task and routes its [`WebConnectOutcome`] into `self.pairing_rx`.
+    fn spawn_pairing<F, Fut>(&mut self, connect_fn: F)
+    where
+        F: FnOnce(OverlayConfig, UiWake) -> Fut + 'static,
+        Fut: Future<Output = Result<Option<WebConnectOutcome>, DeviceError>> + 'static,
+    {
+        self.spawn_pairing_inner(false, connect_fn);
+    }
+
+    fn spawn_pairing_inner<F, Fut>(&mut self, show_ble_help_on_cancel: bool, connect_fn: F)
+    where
+        F: FnOnce(OverlayConfig, UiWake) -> Fut + 'static,
+        Fut: Future<Output = Result<Option<WebConnectOutcome>, DeviceError>> + 'static,
+    {
         self.connection_mgr.set_connecting();
         let (tx, rx) = mpsc::channel();
-        self.pairing_rx = Some(rx);
+        self.pairing_rx = Some((rx, show_ble_help_on_cancel));
         let ui_wake = self.connection_mgr.ui_wake().clone();
         let overlay_config = self.settings.overlay_config();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = request_and_connect_device(overlay_config, ui_wake.clone()).await;
+            let result = connect_fn(overlay_config, ui_wake.clone()).await;
             let _ = tx.send(result);
             ui_wake.request_repaint();
         });
     }
 
-    /// Prompts user to connect a ZMK Studio keyboard over Web Serial.
+    /// Prompts user to pair a WebHID device (QMK/Vial/VIA, or ZMK with KeyPeek module).
+    pub fn request_web_hid_pairing(&mut self) {
+        self.spawn_pairing(request_and_connect_device);
+    }
+
+    /// Prompts user to connect a ZMK Studio keyboard over Web Serial (USB).
     pub fn request_web_serial_pairing(&mut self) {
-        self.connection_mgr.set_connecting();
-        let (tx, rx) = mpsc::channel();
-        self.pairing_rx = Some(rx);
-        let ui_wake = self.connection_mgr.ui_wake().clone();
-        let overlay_config = self.settings.overlay_config();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = request_and_connect_zmk(overlay_config, ui_wake.clone()).await;
-            let _ = tx.send(result);
-            ui_wake.request_repaint();
-        });
+        self.spawn_pairing(request_and_connect_zmk);
+    }
+
+    /// Prompts user to connect a ZMK Studio keyboard over Bluetooth (uses WebHID on Windows/when WebBLE is unavailable, else Web Bluetooth GATT).
+    pub fn request_web_ble_pairing(&mut self) {
+        let on_windows = is_windows_browser();
+        if is_web_hid_supported() && (on_windows || !is_web_bluetooth_supported()) {
+            self.spawn_pairing_inner(on_windows, request_and_connect_zmk_hid);
+        } else {
+            self.spawn_pairing(request_and_connect_zmk_ble);
+        }
     }
 
     /// Opens the browser file chooser for VIA layout JSON files.
@@ -237,23 +271,10 @@ impl WebOverlayApp {
         let Some((device, transport)) = self.pending_via.take() else {
             return;
         };
-        self.connection_mgr.set_connecting();
-        let (tx, rx) = mpsc::channel();
-        self.pairing_rx = Some(rx);
-        let ui_wake = self.connection_mgr.ui_wake().clone();
-        let overlay_config = self.settings.overlay_config();
-        wasm_bindgen_futures::spawn_local(async move {
-            let outcome = connect_via_with_layout(
-                device,
-                transport,
-                json_content,
-                overlay_config,
-                ui_wake.clone(),
-            )
-            .await
-            .map(|conn| Some(WebConnectOutcome::Connected(conn)));
-            let _ = tx.send(outcome);
-            ui_wake.request_repaint();
+        self.spawn_pairing(move |overlay_config, ui_wake| async move {
+            connect_via_with_layout(device, transport, json_content, overlay_config, ui_wake)
+                .await
+                .map(|conn| Some(WebConnectOutcome::Connected(conn)))
         });
     }
 
@@ -298,6 +319,84 @@ impl WebOverlayApp {
             });
     }
 
+    /// Draws the centered QMK/Vial (left) and ZMK (right) firmware connection cards.
+    fn render_connect_cards(&mut self, ui: &mut egui::Ui) {
+        const CARD_GAP: f32 = 18.0;
+
+        let v_pad = ((ui.available_height() - (CARD_HEIGHT + 65.0)) * 0.45).max(20.0);
+        ui.add_space(v_pad);
+
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new("Connect a keyboard to view and edit layers")
+                    .size(15.0)
+                    .weak(),
+            );
+            ui.add_space(20.0);
+
+            let total_row_width = CARD_WIDTH * 2.0 + CARD_GAP;
+            let left_space = ((ui.available_width() - total_row_width) * 0.5).max(0.0);
+
+            let hid_supported = is_web_hid_supported();
+            let serial_supported = is_web_serial_supported();
+            let ble_enabled = is_web_bluetooth_supported() || hid_supported;
+            let usb_label = format!("{} USB", egui_phosphor::regular::USB);
+            let ble_label = format!("{} Bluetooth", egui_phosphor::regular::BLUETOOTH);
+            let ble_hover = if is_windows_browser() {
+                "Connect ZMK keyboard over Bluetooth (requires KeyPeek module on Windows)"
+            } else {
+                "Connect ZMK Studio keyboard over Bluetooth"
+            };
+
+            ui.horizontal(|ui| {
+                if left_space > 0.0 {
+                    ui.add_space(left_space);
+                }
+
+                render_firmware_card(ui, "QMK / Vial", "Vial & VIA keyboards", |ui, btn_w| {
+                    if connect_button(
+                        ui,
+                        btn_w,
+                        hid_supported,
+                        &usb_label,
+                        "Connect QMK, Vial, or VIA keyboard over USB",
+                        "WebHID",
+                    ) {
+                        self.request_web_hid_pairing();
+                    }
+                });
+
+                ui.add_space(CARD_GAP - ui.spacing().item_spacing.x * 2.0);
+
+                render_firmware_card(ui, "ZMK", "ZMK Studio keyboards", |ui, btn_w| {
+                    ui.horizontal(|ui| {
+                        if connect_button(
+                            ui,
+                            btn_w,
+                            serial_supported,
+                            &usb_label,
+                            "Connect ZMK Studio keyboard over USB",
+                            "Web Serial",
+                        ) {
+                            self.request_web_serial_pairing();
+                        }
+
+                        if connect_button(
+                            ui,
+                            btn_w,
+                            ble_enabled,
+                            &ble_label,
+                            ble_hover,
+                            "Web Bluetooth / WebHID",
+                        ) {
+                            self.request_web_ble_pairing();
+                        }
+                    });
+                });
+            });
+        });
+    }
+
     /// Renders the web interface: top bar, editor sidebar, overlay canvas, and modals.
     pub fn render_web(&mut self, ui: &mut egui::Ui) {
         let connected = self.connection_mgr.connected_pair();
@@ -317,70 +416,20 @@ impl WebOverlayApp {
             self.render_web_bottom_bar(ui, keyboard);
         }
 
-        // 4. Central panel for the keyboard overlay canvas or connection buttons
+        // 4. Central panel for the keyboard overlay canvas or connection cards
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some((keyboard, _)) = &connected {
                 self.draw_overlay_canvas(ui, keyboard);
             } else {
-                let v_pad = ((ui.available_height() - 80.0) * 0.45).max(20.0);
-                ui.add_space(v_pad);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("Connect a keyboard to view and edit layers")
-                            .size(15.0)
-                            .weak(),
-                    );
-                    ui.add_space(16.0);
-
-                    let id = ui.id().with("connect_buttons_row");
-                    let row_width: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(270.0);
-                    let left_space = ((ui.available_width() - row_width) * 0.5).max(0.0);
-
-                    ui.horizontal(|ui| {
-                        if left_space > 0.0 {
-                            ui.add_space(left_space);
-                        }
-
-                        let hid_supported = is_web_hid_supported();
-                        let serial_supported = is_web_serial_supported();
-
-                        let mut hid_btn = ui.add_enabled(
-                            hid_supported,
-                            egui::Button::new("Connect QMK / Vial"),
-                        );
-                        if !hid_supported {
-                            hid_btn = hid_btn.on_hover_text(
-                                "WebHID is not supported in this browser. Please use Chrome, Edge, or Opera.",
-                            );
-                        } else if hid_btn.clicked() {
-                            self.request_web_hid_pairing();
-                        }
-
-                        let mut serial_btn = ui.add_enabled(
-                            serial_supported,
-                            egui::Button::new("Connect ZMK"),
-                        );
-                        if !serial_supported {
-                            serial_btn = serial_btn.on_hover_text(
-                                "Web Serial is not supported in this browser. Please use Chrome, Edge, or Opera.",
-                            );
-                        } else if serial_btn.clicked() {
-                            self.request_web_serial_pairing();
-                        }
-
-                        let actual_width = serial_btn.rect.max.x - hid_btn.rect.min.x;
-                        if (actual_width - row_width).abs() > 1.0 {
-                            ui.data_mut(|d| d.insert_temp(id, actual_width));
-                        }
-                    });
-                });
+                self.render_connect_cards(ui);
             }
         });
 
-        // 4. Modal prompts
+        // 5. Modal prompts
         let ctx = ui.ctx().clone();
         self.render_web_layout_modal(&ctx);
         self.render_zmk_telemetry_modal(&ctx);
+        self.render_zmk_ble_windows_help_modal(&ctx);
     }
 
     /// Bottom panel of the main panel: centered layer buttons and bottom-right legend mode.
@@ -669,12 +718,124 @@ impl WebOverlayApp {
         }
     }
 
+    /// Modal shown on Windows only if the user cancels the ZMK Bluetooth picker (e.g. when their
+    /// keyboard is not listed because it does not have the KeyPeek companion module flashed).
+    fn render_zmk_ble_windows_help_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_zmk_ble_windows_help_modal {
+            return;
+        }
+
+        let mut connect_usb = false;
+        let mut close_modal = false;
+
+        egui::Modal::new(egui::Id::new("zmk_ble_windows_help_modal")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.heading("ZMK Bluetooth on Windows");
+            ui.add_space(8.0);
+            ui.label(
+                "Windows blocks standard Web Bluetooth access to keyboards that are already paired in Windows settings.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                "To connect a ZMK keyboard over Bluetooth on Windows, your firmware must include the KeyPeek companion module:",
+            );
+            ui.add_space(4.0);
+            ui.add(
+                egui::Hyperlink::from_label_and_url(
+                    egui::RichText::new(format!(
+                        "{} srwi/zmk-keypeek-layer-notifier",
+                        egui_phosphor::regular::GITHUB_LOGO
+                    )),
+                    KEYPEEK_ZMK_MODULE_URL,
+                )
+                .open_in_new_tab(true),
+            );
+            ui.add_space(8.0);
+            ui.label(
+                "Without the module, you can connect your ZMK keyboard over USB instead:",
+            );
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if is_web_serial_supported()
+                    && ui
+                        .button(egui::RichText::new(format!(
+                            "{} Connect via USB",
+                            egui_phosphor::regular::USB
+                        )))
+                        .clicked()
+                {
+                    connect_usb = true;
+                }
+                if ui.button("Close").clicked() {
+                    close_modal = true;
+                }
+            });
+        });
+
+        if connect_usb {
+            self.show_zmk_ble_windows_help_modal = false;
+            self.request_web_serial_pairing();
+        } else if close_modal {
+            self.show_zmk_ble_windows_help_modal = false;
+        }
+    }
+
     /// Primary entry point called by the web platform runner.
     pub fn ui(&mut self, ui: &mut egui::Ui, host: &mut dyn OverlayHost) {
         let ctx = ui.ctx().clone();
         self.update(&ctx, host);
         self.render_web(ui);
         self.schedule_overlay_repaint(&ctx);
+    }
+}
+
+const CARD_WIDTH: f32 = 225.0;
+const CARD_HEIGHT: f32 = 115.0;
+const BTN_HEIGHT: f32 = 30.0;
+
+/// Renders a firmware connection card with a centered title, subtitle, and button area.
+fn render_firmware_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: &str,
+    add_buttons: impl FnOnce(&mut egui::Ui, f32),
+) {
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::symmetric(18, 16))
+        .corner_radius(8.0)
+        .show(ui, |ui| {
+            ui.set_width(CARD_WIDTH - 36.0);
+            ui.set_min_height(CARD_HEIGHT - 32.0);
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(title).strong().size(16.0));
+                ui.label(egui::RichText::new(subtitle).size(12.0).weak());
+                ui.add_space(14.0);
+                let btn_w = (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
+                add_buttons(ui, btn_w);
+            });
+        });
+}
+
+/// Renders a connection button with standardized sizing and unsupported-browser tooltip handling.
+fn connect_button(
+    ui: &mut egui::Ui,
+    width: f32,
+    enabled: bool,
+    label: &str,
+    hover_text: &str,
+    unsupported_api: &str,
+) -> bool {
+    let btn = ui.add_enabled(
+        enabled,
+        egui::Button::new(label).min_size(egui::vec2(width, BTN_HEIGHT)),
+    );
+    if !enabled {
+        btn.on_hover_text(format!(
+            "{unsupported_api} is not supported in this browser. Please use Chrome, Edge, or Opera."
+        ));
+        false
+    } else {
+        btn.on_hover_text(hover_text).clicked()
     }
 }
 
