@@ -6,7 +6,7 @@
 KeyPeek provides real-time layout visualization and an integrated keymap editor for QMK, Vial, and ZMK keyboards, running in two ways:
 
 - **Desktop app:** Designed for active daily use. A live on-screen overlay that mirrors base and momentary layers in real time (especially useful when learning complex layouts or using boards with missing legends), with the ability to tweak keys directly without interrupting your workflow.
-- **Web app:** A zero-install browser editor (via WebHID/Web Serial) focused on inspecting layouts and remapping keys, sending keycode and behavior updates to the device on the fly from any computer.
+- **Web app:** A zero-install browser editor (USB and bluetooth) focused on inspecting layouts and remapping keys, sending keycode and behavior updates to the device on the fly from any computer.
 
 <p align="center">
   <a href="https://github.com/srwi/keypeek/releases"><strong>Get desktop app</strong></a> &nbsp;|&nbsp; <a href="https://srwi.github.io/keypeek/"><strong>Open web app</strong></a>
@@ -119,7 +119,7 @@ KeyPeek will read layout and keymap directly from the device for ZMK without req
 ### Connecting
 
 - **Desktop:** Devices are scanned when the app starts. For QMK you will be prompted to select the `keyboard_info.json` generated from your keymap when you connect. For Vial and ZMK, just select the connected device from the dropdown, since they provide layout information directly.
-- **Web (WASM):** In a browser supporting WebHID and Web Serial (such as Chrome or Edge), select your keyboard using the browser pairing dialog.
+- **Web:** In a browser supporting WebHID, Web Serial, or Web Bluetooth (such as Chrome or Edge), select your keyboard using the browser pairing dialog.
 
 ### Keymap Editor
 
