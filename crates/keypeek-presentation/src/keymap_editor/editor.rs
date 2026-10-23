@@ -523,7 +523,7 @@ impl EditorState {
         });
         if u16::from_str_radix(&self.draft.hex, 16).is_err() {
             ui.add_space(4.0);
-            ui.weak("Enter a 1–4 digit hex keycode");
+            ui.weak("Enter a 1-4 digit hex keycode");
         }
     }
 }
