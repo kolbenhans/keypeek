@@ -369,21 +369,8 @@ impl WebOverlayApp {
             ui.label(egui::RichText::new("KeyPeek").size(26.0).strong());
             ui.add_space(6.0);
 
-            let is_connecting = self.connection_mgr.is_connecting();
-            let can_connect = !is_connecting;
-
-            let hid_supported = is_web_hid_supported() && can_connect;
-            let serial_supported = is_web_serial_supported() && can_connect;
-            let ble_enabled =
-                (is_web_bluetooth_supported() || is_web_hid_supported()) && can_connect;
-            let blocked_os = ble_blocked_os_name();
-            let ble_hover = match blocked_os {
-                Some(os) => {
-                    format!("Connect ZMK keyboard over Bluetooth (requires KeyPeek module on {os})")
-                }
-                None => "Connect ZMK Studio keyboard over Bluetooth".to_string(),
-            };
-            let ble_hint = blocked_os.map(|_| "Requires KeyPeek firmware module");
+            let browser_supported = is_web_hid_supported() && is_web_serial_supported();
+            let can_connect = browser_supported && !self.connection_mgr.is_connecting();
 
             let total_row_width = BIG_BTN_WIDTH * 2.0 + BIG_BTN_GAP;
             let left_space = ((ui.available_width() - total_row_width) * 0.5).max(0.0);
@@ -395,11 +382,6 @@ impl WebOverlayApp {
             };
             ui.label(egui::RichText::new(prompt).size(15.0).weak());
             ui.add_space(20.0);
-
-            let mut connect_qmk = false;
-            let mut select_zmk = false;
-            let mut connect_zmk_usb = false;
-            let mut connect_zmk_ble = false;
 
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
@@ -413,26 +395,23 @@ impl WebOverlayApp {
                         "QMK / Vial",
                         "VIA & Vial Keyboards (USB)",
                         "Connect QMK, Vial, or VIA keyboard over USB",
-                        "WebHID",
                     )
-                    .show(ui, hid_supported)
+                    .show(ui, can_connect)
                     {
-                        connect_qmk = true;
+                        self.request_web_hid_pairing();
                     }
 
                     ui.add_space(BIG_BTN_GAP);
 
-                    let zmk_supported = (serial_supported || ble_enabled) && can_connect;
                     if ChoiceCard::new(
                         ButtonIcon::Svg(ZMK_LOGO),
                         "ZMK",
                         "ZMK Studio Keyboards",
                         "Connect ZMK Studio keyboard",
-                        "Web Serial / Web Bluetooth",
                     )
-                    .show(ui, zmk_supported)
+                    .show(ui, can_connect)
                     {
-                        select_zmk = true;
+                        self.zmk_selected = true;
                     }
                 } else {
                     if ChoiceCard::new(
@@ -440,46 +419,45 @@ impl WebOverlayApp {
                         "USB",
                         "Wired (Web Serial)",
                         "Connect ZMK Studio keyboard over USB",
-                        "Web Serial",
                     )
-                    .show(ui, serial_supported)
+                    .show(ui, can_connect)
                     {
-                        connect_zmk_usb = true;
+                        self.request_web_serial_pairing();
                     }
 
                     ui.add_space(BIG_BTN_GAP);
 
+                    let blocked_os = ble_blocked_os_name();
+                    let ble_hover = match blocked_os {
+                        Some(os) => format!(
+                            "Connect ZMK keyboard over Bluetooth (requires KeyPeek module on {os})"
+                        ),
+                        None => "Connect ZMK Studio keyboard over Bluetooth".to_string(),
+                    };
                     if ChoiceCard::new(
                         ButtonIcon::Phosphor(egui_phosphor::regular::BLUETOOTH),
                         "Bluetooth",
                         "Wireless (Web Bluetooth)",
                         &ble_hover,
-                        "Web Bluetooth / WebHID",
                     )
-                    .with_hint(ble_hint)
-                    .show(ui, ble_enabled)
+                    .with_hint(blocked_os.map(|_| "Requires KeyPeek firmware module"))
+                    .show(ui, can_connect)
                     {
-                        connect_zmk_ble = true;
+                        self.request_web_ble_pairing();
                     }
                 }
             });
 
-            if connect_qmk {
-                self.request_web_hid_pairing();
-            } else if select_zmk {
-                if serial_supported && ble_enabled {
-                    self.zmk_selected = true;
-                } else if serial_supported {
-                    self.request_web_serial_pairing();
-                } else if ble_enabled {
-                    self.request_web_ble_pairing();
-                } else {
-                    self.zmk_selected = true;
-                }
-            } else if connect_zmk_usb {
-                self.request_web_serial_pairing();
-            } else if connect_zmk_ble {
-                self.request_web_ble_pairing();
+            if !browser_supported {
+                ui.add_space(18.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} This browser does not support required WebHID / Web Serial APIs. Please use a supported browser such as Chrome, Edge, or Opera.",
+                        egui_phosphor::regular::WARNING
+                    ))
+                    .size(13.0)
+                    .color(egui::Color32::KHAKI),
+                );
             }
         });
     }
@@ -793,10 +771,13 @@ impl WebOverlayApp {
         if !self.show_zmk_ble_help_modal {
             return;
         }
+        let Some(os_name) = ble_blocked_os_name() else {
+            self.show_zmk_ble_help_modal = false;
+            return;
+        };
 
         let mut connect_usb = false;
         let mut close_modal = false;
-        let os_name = ble_blocked_os_name().unwrap_or("Windows");
 
         egui::Modal::new(egui::Id::new("zmk_ble_help_modal")).show(ctx, |ui| {
             ui.set_max_width(420.0);
@@ -948,24 +929,16 @@ struct ChoiceCard<'a> {
     subtitle: &'a str,
     hint: Option<&'a str>,
     hover_text: &'a str,
-    unsupported_api: &'a str,
 }
 
 impl<'a> ChoiceCard<'a> {
-    fn new(
-        icon: ButtonIcon<'a>,
-        title: &'a str,
-        subtitle: &'a str,
-        hover_text: &'a str,
-        unsupported_api: &'a str,
-    ) -> Self {
+    fn new(icon: ButtonIcon<'a>, title: &'a str, subtitle: &'a str, hover_text: &'a str) -> Self {
         Self {
             icon,
             title,
             subtitle,
             hint: None,
             hover_text,
-            unsupported_api,
         }
     }
 
@@ -983,12 +956,7 @@ impl<'a> ChoiceCard<'a> {
         let is_hovered = enabled && response.hovered();
         let is_down = enabled && response.is_pointer_button_down_on();
 
-        if !enabled {
-            response = response.on_hover_text(format!(
-                "{} is not supported in this browser. Please use Chrome, Edge, or Opera.",
-                self.unsupported_api
-            ));
-        } else {
+        if enabled {
             if is_hovered {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
