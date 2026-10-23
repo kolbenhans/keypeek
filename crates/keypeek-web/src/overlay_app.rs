@@ -27,6 +27,8 @@ const ZMK_LOGO: egui::ImageSource<'_> = egui::include_image!("../../../resources
 
 const BIG_BTN_WIDTH: f32 = 230.0;
 const BIG_BTN_HEIGHT: f32 = 135.0;
+const BIG_BTN_GAP: f32 = 20.0;
+const ROW_WIDTH: f32 = BIG_BTN_WIDTH * 2.0 + BIG_BTN_GAP;
 
 #[derive(Clone)]
 enum ButtonIcon<'a> {
@@ -350,116 +352,125 @@ impl WebOverlayApp {
 
     /// Draws the centered firmware selection or ZMK connection method.
     fn render_connect_cards(&mut self, ui: &mut egui::Ui) {
-        const BIG_BTN_GAP: f32 = 20.0;
         const LOGO_SIZE: f32 = 150.0;
 
-        let total_block_height = LOGO_SIZE + 14.0 + 30.0 + 6.0 + 20.0 + 22.0 + BIG_BTN_HEIGHT;
+        let content_w = (ui.available_width() - 32.0).clamp(BIG_BTN_WIDTH, ROW_WIDTH);
+        let cards_height = if content_w < ROW_WIDTH {
+            BIG_BTN_HEIGHT * 2.0 + BIG_BTN_GAP
+        } else {
+            BIG_BTN_HEIGHT
+        };
+
+        let total_block_height = LOGO_SIZE + 14.0 + 30.0 + 6.0 + 20.0 + 22.0 + cards_height;
         let v_pad = ((ui.available_height() - total_block_height) * 0.38).max(12.0);
-        ui.add_space(v_pad);
 
-        ui.vertical_centered(|ui| {
-            let logo_color = ui.visuals().weak_text_color().gamma_multiply(0.55);
-            ui.add(
-                egui::Image::new(KEYPEEK_LOGO)
-                    .tint(logo_color)
-                    .fit_to_exact_size(egui::vec2(LOGO_SIZE, LOGO_SIZE)),
-            );
-            ui.add_space(14.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(v_pad);
 
-            ui.label(egui::RichText::new("KeyPeek").size(26.0).strong());
-            ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(content_w, 0.0),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| {
+                            let logo_color = ui.visuals().weak_text_color().gamma_multiply(0.55);
+                            ui.add(
+                                egui::Image::new(KEYPEEK_LOGO)
+                                    .tint(logo_color)
+                                    .fit_to_exact_size(egui::vec2(LOGO_SIZE, LOGO_SIZE)),
+                            );
+                            ui.add_space(14.0);
 
-            let browser_supported = is_web_hid_supported() && is_web_serial_supported();
-            let can_connect = browser_supported && !self.connection_mgr.is_connecting();
+                            ui.label(egui::RichText::new("KeyPeek").size(26.0).strong());
+                            ui.add_space(6.0);
 
-            let total_row_width = BIG_BTN_WIDTH * 2.0 + BIG_BTN_GAP;
-            let left_space = ((ui.available_width() - total_row_width) * 0.5).max(0.0);
+                            let browser_supported =
+                                is_web_hid_supported() && is_web_serial_supported();
+                            let can_connect =
+                                browser_supported && !self.connection_mgr.is_connecting();
 
-            let prompt = if !self.zmk_selected {
-                "Connect a keyboard to view and edit layers"
-            } else {
-                "Connect ZMK keyboard via:"
-            };
-            ui.label(egui::RichText::new(prompt).size(15.0).weak());
-            ui.add_space(20.0);
+                            let prompt = if !self.zmk_selected {
+                                "Connect a keyboard to view and edit layers"
+                            } else {
+                                "Connect ZMK keyboard via:"
+                            };
+                            ui.label(egui::RichText::new(prompt).size(15.0).weak());
+                            ui.add_space(20.0);
 
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                if left_space > 0.0 {
-                    ui.add_space(left_space);
-                }
+                            if !self.zmk_selected {
+                                let (qmk, zmk) = draw_card_pair(
+                                    ui,
+                                    can_connect,
+                                    ChoiceCard::new(
+                                        ButtonIcon::Svg(QMK_LOGO),
+                                        "QMK / Vial",
+                                        "VIA & Vial Keyboards (USB)",
+                                        "Connect QMK, Vial, or VIA keyboard over USB",
+                                    ),
+                                    ChoiceCard::new(
+                                        ButtonIcon::Svg(ZMK_LOGO),
+                                        "ZMK",
+                                        "ZMK Studio Keyboards",
+                                        "Connect ZMK Studio keyboard",
+                                    ),
+                                );
+                                if qmk {
+                                    self.request_web_hid_pairing();
+                                } else if zmk {
+                                    self.zmk_selected = true;
+                                }
+                            } else {
+                                let blocked_os = ble_blocked_os_name();
+                                let ble_hover = match blocked_os {
+                                    Some(os) => format!(
+                                        "Connect ZMK keyboard over Bluetooth (requires KeyPeek module on {os})"
+                                    ),
+                                    None => "Connect ZMK Studio keyboard over Bluetooth".to_string(),
+                                };
+                                let (usb, ble) = draw_card_pair(
+                                    ui,
+                                    can_connect,
+                                    ChoiceCard::new(
+                                        ButtonIcon::Phosphor(egui_phosphor::regular::USB),
+                                        "USB",
+                                        "Wired (Web Serial)",
+                                        "Connect ZMK Studio keyboard over USB",
+                                    ),
+                                    ChoiceCard::new(
+                                        ButtonIcon::Phosphor(egui_phosphor::regular::BLUETOOTH),
+                                        "Bluetooth",
+                                        "Wireless (Web Bluetooth)",
+                                        &ble_hover,
+                                    )
+                                    .with_hint(
+                                        blocked_os.map(|_| "Requires KeyPeek firmware module"),
+                                    ),
+                                );
+                                if usb {
+                                    self.request_web_serial_pairing();
+                                } else if ble {
+                                    self.request_web_ble_pairing();
+                                }
+                            }
 
-                if !self.zmk_selected {
-                    if ChoiceCard::new(
-                        ButtonIcon::Svg(QMK_LOGO),
-                        "QMK / Vial",
-                        "VIA & Vial Keyboards (USB)",
-                        "Connect QMK, Vial, or VIA keyboard over USB",
-                    )
-                    .show(ui, can_connect)
-                    {
-                        self.request_web_hid_pairing();
-                    }
+                            if !browser_supported {
+                                ui.add_space(18.0);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} This browser does not support required WebHID / Web Serial APIs. Please use a supported browser such as Chrome, Edge or Opera.",
+                                        egui_phosphor::regular::WARNING
+                                    ))
+                                    .size(13.0)
+                                    .color(egui::Color32::KHAKI),
+                                );
+                            }
 
-                    ui.add_space(BIG_BTN_GAP);
-
-                    if ChoiceCard::new(
-                        ButtonIcon::Svg(ZMK_LOGO),
-                        "ZMK",
-                        "ZMK Studio Keyboards",
-                        "Connect ZMK Studio keyboard",
-                    )
-                    .show(ui, can_connect)
-                    {
-                        self.zmk_selected = true;
-                    }
-                } else {
-                    if ChoiceCard::new(
-                        ButtonIcon::Phosphor(egui_phosphor::regular::USB),
-                        "USB",
-                        "Wired (Web Serial)",
-                        "Connect ZMK Studio keyboard over USB",
-                    )
-                    .show(ui, can_connect)
-                    {
-                        self.request_web_serial_pairing();
-                    }
-
-                    ui.add_space(BIG_BTN_GAP);
-
-                    let blocked_os = ble_blocked_os_name();
-                    let ble_hover = match blocked_os {
-                        Some(os) => format!(
-                            "Connect ZMK keyboard over Bluetooth (requires KeyPeek module on {os})"
-                        ),
-                        None => "Connect ZMK Studio keyboard over Bluetooth".to_string(),
-                    };
-                    if ChoiceCard::new(
-                        ButtonIcon::Phosphor(egui_phosphor::regular::BLUETOOTH),
-                        "Bluetooth",
-                        "Wireless (Web Bluetooth)",
-                        &ble_hover,
-                    )
-                    .with_hint(blocked_os.map(|_| "Requires KeyPeek firmware module"))
-                    .show(ui, can_connect)
-                    {
-                        self.request_web_ble_pairing();
-                    }
-                }
+                            ui.add_space(16.0);
+                        },
+                    );
+                });
             });
-
-            if !browser_supported {
-                ui.add_space(18.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} This browser does not support required WebHID / Web Serial APIs. Please use a supported browser such as Chrome, Edge, or Opera.",
-                        egui_phosphor::regular::WARNING
-                    ))
-                    .size(13.0)
-                    .color(egui::Color32::KHAKI),
-                );
-            }
-        });
     }
 
     /// Renders the web interface: top bar, editor sidebar, overlay canvas, and modals.
@@ -919,6 +930,27 @@ impl WebOverlayApp {
         self.update(&ctx, host);
         self.render_web(ui);
         self.schedule_overlay_repaint(&ctx);
+    }
+}
+
+/// Renders two [`ChoiceCard`]s side-by-side on wide screens or stacked vertically on narrow screens.
+fn draw_card_pair(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    first: ChoiceCard<'_>,
+    second: ChoiceCard<'_>,
+) -> (bool, bool) {
+    if ui.available_width() < ROW_WIDTH {
+        let a = first.show(ui, enabled);
+        ui.add_space(BIG_BTN_GAP);
+        let b = second.show(ui, enabled);
+        (a, b)
+    } else {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = BIG_BTN_GAP;
+            (first.show(ui, enabled), second.show(ui, enabled))
+        })
+        .inner
     }
 }
 

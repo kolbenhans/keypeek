@@ -197,8 +197,7 @@ pub async fn request_web_serial_port() -> Result<Option<web_sys::SerialPort>, De
         web_sys::window().ok_or_else(|| DeviceError::Transport("No window found".into()))?;
     if !is_web_serial_supported() {
         return Err(DeviceError::Unsupported(
-            "Web Serial is not supported by your browser. Please use Chrome, Edge, or Opera."
-                .into(),
+            "Web Serial is not supported by your browser. Please use Chrome, Edge or Opera.".into(),
         ));
     }
 

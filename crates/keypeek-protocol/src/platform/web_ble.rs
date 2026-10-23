@@ -73,7 +73,7 @@ pub async fn request_web_ble_device() -> Result<Option<web_sys::BluetoothDevice>
         web_sys::window().ok_or_else(|| DeviceError::Transport("No window found".into()))?;
     if !is_web_bluetooth_supported() {
         return Err(DeviceError::Unsupported(
-            "Web Bluetooth is not supported by your browser. Please use Chrome, Edge, or Opera."
+            "Web Bluetooth is not supported by your browser. Please use Chrome, Edge or Opera."
                 .into(),
         ));
     }

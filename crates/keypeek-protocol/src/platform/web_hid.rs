@@ -416,7 +416,7 @@ pub async fn request_web_hid_device_with_filter(
         web_sys::window().ok_or_else(|| DeviceError::Transport("No window found".into()))?;
     if !is_web_hid_supported() {
         return Err(DeviceError::Unsupported(
-            "WebHID is not supported by your browser. Please use Chrome, Edge, or Opera.".into(),
+            "WebHID is not supported by your browser. Please use Chrome, Edge or Opera.".into(),
         ));
     }
 
