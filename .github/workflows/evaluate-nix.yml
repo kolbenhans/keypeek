@@ -1,4 +1,4 @@
-name: evaluate-nix
+name: Evaluate Nix Flake
 
 on:
   push:

@@ -9,7 +9,7 @@ use keypeek_presentation::{
 use keypeek_protocol::connection_manager::{ConnectionEvent, ConnectionState};
 use keypeek_protocol::platform::web::{ConnectedWebDevice, OverlayConfig};
 use keypeek_protocol::platform::web_ble::{
-    is_web_bluetooth_supported, is_windows_browser, request_and_connect_zmk_ble,
+    ble_blocked_os_name, is_web_bluetooth_supported, request_and_connect_zmk_ble,
 };
 use keypeek_protocol::platform::web_hid::{
     connect_via_with_layout, is_web_hid_supported, request_and_connect_device,
@@ -24,6 +24,9 @@ const KEYPEEK_LOGO: egui::ImageSource<'_> =
     egui::include_image!("../../../resources/icon_monochrome.svg");
 const QMK_LOGO: egui::ImageSource<'_> = egui::include_image!("../../../resources/qmk.svg");
 const ZMK_LOGO: egui::ImageSource<'_> = egui::include_image!("../../../resources/zmk.svg");
+
+const BIG_BTN_WIDTH: f32 = 230.0;
+const BIG_BTN_HEIGHT: f32 = 135.0;
 
 #[derive(Clone)]
 enum ButtonIcon<'a> {
@@ -51,7 +54,7 @@ pub struct WebOverlayApp {
     pub(crate) telemetry_hid: Option<WebHidTransport>,
     pub(crate) telemetry_rx: Option<mpsc::Receiver<Option<WebHidTransport>>>,
     pub(crate) selected_layer: Option<usize>,
-    pub(crate) show_zmk_ble_windows_help_modal: bool,
+    pub(crate) show_zmk_ble_help_modal: bool,
     pub(crate) zmk_selected: bool,
 }
 
@@ -90,7 +93,7 @@ impl WebOverlayApp {
             telemetry_hid: None,
             telemetry_rx: None,
             selected_layer: None,
-            show_zmk_ble_windows_help_modal: false,
+            show_zmk_ble_help_modal: false,
             zmk_selected: false,
         }
     }
@@ -119,7 +122,7 @@ impl WebOverlayApp {
         self.pending_zmk_telemetry = None;
         self.telemetry_hid = None;
         self.web_file_rx = None;
-        self.show_zmk_ble_windows_help_modal = false;
+        self.show_zmk_ble_help_modal = false;
         self.zmk_selected = false;
     }
 
@@ -176,7 +179,7 @@ impl WebOverlayApp {
                         self.connection_mgr.disconnect();
                     }
                     if show_ble_help_on_cancel {
-                        self.show_zmk_ble_windows_help_modal = true;
+                        self.show_zmk_ble_help_modal = true;
                     }
                 }
                 Ok(Err(err)) => {
@@ -274,11 +277,11 @@ impl WebOverlayApp {
         self.spawn_pairing(request_and_connect_zmk);
     }
 
-    /// Prompts user to connect a ZMK Studio keyboard over Bluetooth (uses WebHID on Windows/when WebBLE is unavailable, else Web Bluetooth GATT).
+    /// Prompts user to connect a ZMK Studio keyboard over Bluetooth (uses WebHID on Windows/macOS or when WebBLE is unavailable, else Web Bluetooth GATT).
     pub fn request_web_ble_pairing(&mut self) {
-        let on_windows = is_windows_browser();
-        if is_web_hid_supported() && (on_windows || !is_web_bluetooth_supported()) {
-            self.spawn_pairing_inner(on_windows, request_and_connect_zmk_hid);
+        let use_hid_tunnel = ble_blocked_os_name().is_some();
+        if is_web_hid_supported() && (use_hid_tunnel || !is_web_bluetooth_supported()) {
+            self.spawn_pairing_inner(use_hid_tunnel, request_and_connect_zmk_hid);
         } else {
             self.spawn_pairing(request_and_connect_zmk_ble);
         }
@@ -347,8 +350,6 @@ impl WebOverlayApp {
 
     /// Draws the centered firmware selection or ZMK connection method.
     fn render_connect_cards(&mut self, ui: &mut egui::Ui) {
-        const BIG_BTN_WIDTH: f32 = 230.0;
-        const BIG_BTN_HEIGHT: f32 = 135.0;
         const BIG_BTN_GAP: f32 = 20.0;
         const LOGO_SIZE: f32 = 150.0;
 
@@ -375,11 +376,14 @@ impl WebOverlayApp {
             let serial_supported = is_web_serial_supported() && can_connect;
             let ble_enabled =
                 (is_web_bluetooth_supported() || is_web_hid_supported()) && can_connect;
-            let ble_hover = if is_windows_browser() {
-                "Connect ZMK keyboard over Bluetooth (requires KeyPeek module on Windows)"
-            } else {
-                "Connect ZMK Studio keyboard over Bluetooth"
+            let blocked_os = ble_blocked_os_name();
+            let ble_hover = match blocked_os {
+                Some(os) => {
+                    format!("Connect ZMK keyboard over Bluetooth (requires KeyPeek module on {os})")
+                }
+                None => "Connect ZMK Studio keyboard over Bluetooth".to_string(),
             };
+            let ble_hint = blocked_os.map(|_| "Requires KeyPeek firmware module");
 
             let total_row_width = BIG_BTN_WIDTH * 2.0 + BIG_BTN_GAP;
             let left_space = ((ui.available_width() - total_row_width) * 0.5).max(0.0);
@@ -404,64 +408,57 @@ impl WebOverlayApp {
                 }
 
                 if !self.zmk_selected {
-                    if big_choice_button(
-                        ui,
-                        BIG_BTN_WIDTH,
-                        BIG_BTN_HEIGHT,
-                        hid_supported,
+                    if ChoiceCard::new(
                         ButtonIcon::Svg(QMK_LOGO),
                         "QMK / Vial",
                         "VIA & Vial Keyboards (USB)",
                         "Connect QMK, Vial, or VIA keyboard over USB",
                         "WebHID",
-                    ) {
+                    )
+                    .show(ui, hid_supported)
+                    {
                         connect_qmk = true;
                     }
 
                     ui.add_space(BIG_BTN_GAP);
 
                     let zmk_supported = (serial_supported || ble_enabled) && can_connect;
-                    if big_choice_button(
-                        ui,
-                        BIG_BTN_WIDTH,
-                        BIG_BTN_HEIGHT,
-                        zmk_supported,
+                    if ChoiceCard::new(
                         ButtonIcon::Svg(ZMK_LOGO),
                         "ZMK",
                         "ZMK Studio Keyboards",
                         "Connect ZMK Studio keyboard",
                         "Web Serial / Web Bluetooth",
-                    ) {
+                    )
+                    .show(ui, zmk_supported)
+                    {
                         select_zmk = true;
                     }
                 } else {
-                    if big_choice_button(
-                        ui,
-                        BIG_BTN_WIDTH,
-                        BIG_BTN_HEIGHT,
-                        serial_supported,
+                    if ChoiceCard::new(
                         ButtonIcon::Phosphor(egui_phosphor::regular::USB),
                         "USB",
                         "Wired (Web Serial)",
                         "Connect ZMK Studio keyboard over USB",
                         "Web Serial",
-                    ) {
+                    )
+                    .show(ui, serial_supported)
+                    {
                         connect_zmk_usb = true;
                     }
 
                     ui.add_space(BIG_BTN_GAP);
 
-                    if big_choice_button(
-                        ui,
-                        BIG_BTN_WIDTH,
-                        BIG_BTN_HEIGHT,
-                        ble_enabled,
+                    if ChoiceCard::new(
                         ButtonIcon::Phosphor(egui_phosphor::regular::BLUETOOTH),
                         "Bluetooth",
                         "Wireless (Web Bluetooth)",
-                        ble_hover,
+                        &ble_hover,
                         "Web Bluetooth / WebHID",
-                    ) {
+                    )
+                    .with_hint(ble_hint)
+                    .show(ui, ble_enabled)
+                    {
                         connect_zmk_ble = true;
                     }
                 }
@@ -519,7 +516,7 @@ impl WebOverlayApp {
         let ctx = ui.ctx().clone();
         self.render_web_layout_modal(&ctx);
         self.render_zmk_telemetry_modal(&ctx);
-        self.render_zmk_ble_windows_help_modal(&ctx);
+        self.render_zmk_ble_help_modal(&ctx);
         self.render_error_modal(&ctx);
         self.render_notice_modal(&ctx);
     }
@@ -790,27 +787,28 @@ impl WebOverlayApp {
         }
     }
 
-    /// Modal shown on Windows only if the user cancels the ZMK Bluetooth picker (e.g. when their
+    /// Modal shown on Windows and macOS if the user cancels the ZMK Bluetooth picker (e.g. when their
     /// keyboard is not listed because it does not have the KeyPeek companion module flashed).
-    fn render_zmk_ble_windows_help_modal(&mut self, ctx: &egui::Context) {
-        if !self.show_zmk_ble_windows_help_modal {
+    fn render_zmk_ble_help_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_zmk_ble_help_modal {
             return;
         }
 
         let mut connect_usb = false;
         let mut close_modal = false;
+        let os_name = ble_blocked_os_name().unwrap_or("Windows");
 
-        egui::Modal::new(egui::Id::new("zmk_ble_windows_help_modal")).show(ctx, |ui| {
+        egui::Modal::new(egui::Id::new("zmk_ble_help_modal")).show(ctx, |ui| {
             ui.set_max_width(420.0);
-            ui.heading("ZMK Bluetooth on Windows");
+            ui.heading(format!("ZMK Bluetooth on {os_name}"));
             ui.add_space(8.0);
-            ui.label(
-                "Windows blocks standard Web Bluetooth access to keyboards that are already paired in Windows settings.",
-            );
+            ui.label(format!(
+                "{os_name} blocks standard Web Bluetooth access to keyboards that are already paired in {os_name} settings."
+            ));
             ui.add_space(6.0);
-            ui.label(
-                "To connect a ZMK keyboard over Bluetooth on Windows, your firmware must include the KeyPeek companion module:",
-            );
+            ui.label(format!(
+                "To connect a ZMK keyboard over Bluetooth on {os_name}, your firmware must include the KeyPeek companion module:"
+            ));
             ui.add_space(4.0);
             ui.add(
                 egui::Hyperlink::from_label_and_url(
@@ -845,10 +843,10 @@ impl WebOverlayApp {
         });
 
         if connect_usb {
-            self.show_zmk_ble_windows_help_modal = false;
+            self.show_zmk_ble_help_modal = false;
             self.request_web_serial_pairing();
         } else if close_modal {
-            self.show_zmk_ble_windows_help_modal = false;
+            self.show_zmk_ble_help_modal = false;
         }
     }
 
@@ -943,107 +941,144 @@ impl WebOverlayApp {
     }
 }
 
-/// Renders a large interactive choice card/button with icon, title, and subtitle.
-fn big_choice_button(
-    ui: &mut egui::Ui,
-    width: f32,
-    height: f32,
-    enabled: bool,
-    icon: ButtonIcon<'_>,
-    title: &str,
-    subtitle: &str,
-    hover_text: &str,
-    unsupported_api: &str,
-) -> bool {
-    let (rect, mut response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+/// Interactive choice card with icon, title, subtitle, and optional hint line.
+struct ChoiceCard<'a> {
+    icon: ButtonIcon<'a>,
+    title: &'a str,
+    subtitle: &'a str,
+    hint: Option<&'a str>,
+    hover_text: &'a str,
+    unsupported_api: &'a str,
+}
 
-    let is_hovered = enabled && response.hovered();
-    let is_down = enabled && response.is_pointer_button_down_on();
-
-    if !enabled {
-        response = response.on_hover_text(format!(
-            "{unsupported_api} is not supported in this browser. Please use Chrome, Edge, or Opera."
-        ));
-    } else {
-        if is_hovered {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if !hover_text.is_empty() {
-            response = response.on_hover_text(hover_text);
+impl<'a> ChoiceCard<'a> {
+    fn new(
+        icon: ButtonIcon<'a>,
+        title: &'a str,
+        subtitle: &'a str,
+        hover_text: &'a str,
+        unsupported_api: &'a str,
+    ) -> Self {
+        Self {
+            icon,
+            title,
+            subtitle,
+            hint: None,
+            hover_text,
+            unsupported_api,
         }
     }
 
-    let bg_fill = if !enabled {
-        ui.visuals().widgets.noninteractive.bg_fill
-    } else if is_down {
-        ui.visuals().widgets.active.bg_fill
-    } else if is_hovered {
-        ui.visuals().widgets.hovered.bg_fill
-    } else {
-        ui.visuals().faint_bg_color
-    };
+    fn with_hint(mut self, hint: Option<&'a str>) -> Self {
+        self.hint = hint;
+        self
+    }
 
-    let stroke = if is_hovered {
-        ui.visuals().widgets.hovered.bg_stroke
-    } else {
-        ui.visuals().widgets.noninteractive.bg_stroke
-    };
+    fn show(self, ui: &mut egui::Ui, enabled: bool) -> bool {
+        let (rect, mut response) = ui.allocate_exact_size(
+            egui::vec2(BIG_BTN_WIDTH, BIG_BTN_HEIGHT),
+            egui::Sense::click(),
+        );
 
-    let text_color = if !enabled {
-        ui.visuals().widgets.noninteractive.text_color()
-    } else if is_down {
-        ui.visuals().widgets.active.text_color()
-    } else if is_hovered {
-        ui.visuals().widgets.hovered.text_color()
-    } else {
-        ui.visuals().widgets.inactive.text_color()
-    };
+        let is_hovered = enabled && response.hovered();
+        let is_down = enabled && response.is_pointer_button_down_on();
 
-    ui.painter().rect_filled(rect, 12.0, bg_fill);
-    ui.painter()
-        .rect_stroke(rect, 12.0, stroke, egui::StrokeKind::Inside);
+        if !enabled {
+            response = response.on_hover_text(format!(
+                "{} is not supported in this browser. Please use Chrome, Edge, or Opera.",
+                self.unsupported_api
+            ));
+        } else {
+            if is_hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if !self.hover_text.is_empty() {
+                response = response.on_hover_text(self.hover_text);
+            }
+        }
 
-    let painter = ui.painter();
-    let center_x = rect.center().x;
+        let bg_fill = if !enabled {
+            ui.visuals().widgets.noninteractive.bg_fill
+        } else if is_down {
+            ui.visuals().widgets.active.bg_fill
+        } else if is_hovered {
+            ui.visuals().widgets.hovered.bg_fill
+        } else {
+            ui.visuals().faint_bg_color
+        };
 
-    let icon_pos = egui::pos2(center_x, rect.top() + 38.0);
-    match icon {
-        ButtonIcon::Phosphor(glyph) => {
+        let stroke = if is_hovered {
+            ui.visuals().widgets.hovered.bg_stroke
+        } else {
+            ui.visuals().widgets.noninteractive.bg_stroke
+        };
+
+        let text_color = if !enabled {
+            ui.visuals().widgets.noninteractive.text_color()
+        } else if is_down {
+            ui.visuals().widgets.active.text_color()
+        } else if is_hovered {
+            ui.visuals().widgets.hovered.text_color()
+        } else {
+            ui.visuals().widgets.inactive.text_color()
+        };
+
+        ui.painter().rect_filled(rect, 12.0, bg_fill);
+        ui.painter()
+            .rect_stroke(rect, 12.0, stroke, egui::StrokeKind::Inside);
+
+        let painter = ui.painter();
+        let center_x = rect.center().x;
+
+        let icon_pos = egui::pos2(center_x, rect.top() + 36.0);
+        match self.icon {
+            ButtonIcon::Phosphor(glyph) => {
+                painter.text(
+                    icon_pos,
+                    egui::Align2::CENTER_CENTER,
+                    glyph,
+                    egui::FontId::proportional(32.0),
+                    text_color,
+                );
+            }
+            ButtonIcon::Svg(source) => {
+                let icon_rect = egui::Rect::from_center_size(icon_pos, egui::vec2(34.0, 34.0));
+                egui::Image::new(source)
+                    .tint(text_color)
+                    .paint_at(ui, icon_rect);
+            }
+        }
+
+        let title_pos = egui::pos2(center_x, rect.top() + 72.0);
+        painter.text(
+            title_pos,
+            egui::Align2::CENTER_CENTER,
+            self.title,
+            egui::FontId::proportional(16.5),
+            text_color,
+        );
+
+        let subtitle_pos = egui::pos2(center_x, rect.top() + 97.0);
+        let weak_text_color = ui.visuals().weak_text_color();
+        painter.text(
+            subtitle_pos,
+            egui::Align2::CENTER_CENTER,
+            self.subtitle,
+            egui::FontId::proportional(12.0),
+            weak_text_color,
+        );
+
+        if let Some(hint_text) = self.hint {
+            let hint_pos = egui::pos2(center_x, rect.top() + 116.0);
             painter.text(
-                icon_pos,
+                hint_pos,
                 egui::Align2::CENTER_CENTER,
-                glyph,
-                egui::FontId::proportional(32.0),
-                text_color,
+                hint_text,
+                egui::FontId::proportional(10.5),
+                weak_text_color.gamma_multiply(0.8),
             );
         }
-        ButtonIcon::Svg(source) => {
-            let icon_rect = egui::Rect::from_center_size(icon_pos, egui::vec2(34.0, 34.0));
-            egui::Image::new(source)
-                .tint(text_color)
-                .paint_at(ui, icon_rect);
-        }
+
+        enabled && response.clicked()
     }
-
-    let title_pos = egui::pos2(center_x, rect.top() + 75.0);
-    painter.text(
-        title_pos,
-        egui::Align2::CENTER_CENTER,
-        title,
-        egui::FontId::proportional(16.5),
-        text_color,
-    );
-
-    let subtitle_pos = egui::pos2(center_x, rect.top() + 101.0);
-    let weak_text_color = ui.visuals().weak_text_color();
-    painter.text(
-        subtitle_pos,
-        egui::Align2::CENTER_CENTER,
-        subtitle,
-        egui::FontId::proportional(12.0),
-        weak_text_color,
-    );
-
-    enabled && response.clicked()
 }

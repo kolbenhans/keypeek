@@ -41,18 +41,36 @@ pub fn is_web_bluetooth_supported() -> bool {
     false
 }
 
-/// Returns whether the browser is running on Windows, where Chromium's Web Bluetooth chooser
-/// only scans for unpaired/advertising devices and hides already OS-connected BLE keyboards.
+/// Identifies operating systems (`"Windows"`, `"macOS"`) from a browser User-Agent string where
+/// Chromium's Web Bluetooth chooser cannot connect to already OS-paired BLE keyboards.
+pub fn ble_blocked_os_from_user_agent(ua: &str) -> Option<&'static str> {
+    if ua.contains("Windows") || ua.contains("Win64") || ua.contains("Win32") {
+        Some("Windows")
+    } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
+        Some("macOS")
+    } else {
+        None
+    }
+}
+
+/// Returns the OS name (`"Windows"` or `"macOS"`) if the current browser environment blocks
+/// direct Web Bluetooth access to already-paired keyboards and requires the WebHID RPC tunnel.
 #[cfg(target_arch = "wasm32")]
-pub fn is_windows_browser() -> bool {
+pub fn ble_blocked_os_name() -> Option<&'static str> {
     web_sys::window()
         .and_then(|w| w.navigator().user_agent().ok())
-        .is_some_and(|ua| ua.contains("Windows") || ua.contains("Win64") || ua.contains("Win32"))
+        .and_then(|ua| ble_blocked_os_from_user_agent(&ua))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn is_windows_browser() -> bool {
-    cfg!(target_os = "windows")
+pub fn ble_blocked_os_name() -> Option<&'static str> {
+    if cfg!(target_os = "windows") {
+        Some("Windows")
+    } else if cfg!(target_os = "macos") {
+        Some("macOS")
+    } else {
+        None
+    }
 }
 
 /// Prompts the user to select and pair a ZMK Studio BLE keyboard via Web Bluetooth.
