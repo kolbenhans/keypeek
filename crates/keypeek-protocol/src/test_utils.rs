@@ -7,7 +7,8 @@ use crate::application::Keyboard;
 use crate::firmware::qmk::QmkEditorProfile;
 use crate::key_presenter::StandardKeyPresenter;
 use crate::protocols::{
-    ConnectionSpec, DeviceError, EventSubscription, KeyboardProtocol, StopSignal, WriteSupport,
+    ConnectionSpec, DeviceError, DeviceEvent, EventSubscription, KeyboardProtocol, StopSignal,
+    WriteSupport,
 };
 use crate::ui_wake::UiWake;
 use keypeek_core::{
@@ -20,6 +21,7 @@ pub struct TestProtocol {
     pub definition: KeyboardDefinition,
     pub snapshot: KeymapSnapshot,
     pub write_support: WriteSupport,
+    event_tx: Option<mpsc::Sender<DeviceEvent>>,
 }
 
 impl Default for TestProtocol {
@@ -28,6 +30,7 @@ impl Default for TestProtocol {
             definition: default_test_definition(),
             snapshot: default_test_snapshot(),
             write_support: WriteSupport::None,
+            event_tx: None,
         }
     }
 }
@@ -38,6 +41,7 @@ impl TestProtocol {
             definition,
             snapshot,
             write_support: WriteSupport::None,
+            event_tx: None,
         }
     }
 
@@ -57,8 +61,13 @@ impl KeyboardProtocol for TestProtocol {
     }
 
     fn subscribe_events(&mut self) -> Result<EventSubscription, DeviceError> {
-        let (_tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        self.event_tx = Some(tx);
         Ok(EventSubscription::new(rx, StopSignal::new()))
+    }
+
+    fn disconnect(&mut self) {
+        self.event_tx = None;
     }
 
     fn write_support(&self) -> WriteSupport {
