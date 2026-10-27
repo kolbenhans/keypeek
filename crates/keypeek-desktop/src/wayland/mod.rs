@@ -50,11 +50,26 @@ use wayland_client::{
 
 use egui_glow::glow;
 
-use keypeek_presentation::{add_phosphor_to_fonts, DesktopOverlayApp, OverlayHost, SettingsStore};
+use keypeek_presentation::{
+    add_phosphor_to_fonts, DesktopOverlayApp, MonitorSelection, OverlayHost, SettingsStore,
+};
 use keypeek_protocol::{DiscoveredDevice, UiWake};
 
 use egl::EglState;
 use input::InputState;
+
+// None means "let the compositor pick" — Wayland has no "primary output" flag.
+fn resolve_target_output(
+    output_state: &OutputState,
+    selection: &MonitorSelection,
+) -> Option<WlOutput> {
+    let MonitorSelection::Named(name) = selection else {
+        return None;
+    };
+    output_state
+        .outputs()
+        .find(|o| output_state.info(o).and_then(|i| i.name).as_deref() == Some(name.as_str()))
+}
 
 /// Records the egui UI's host requests during one frame, applied after `ui()` returns
 /// (we can't touch the Wayland objects while the app borrow is live).
@@ -80,7 +95,7 @@ struct WaylandApp {
     seat_state: SeatState,
     compositor_state: CompositorState,
 
-    layer: LayerSurface,
+    layer: Option<LayerSurface>,
     /// Maps the buffer to the logical surface size under fractional scaling;
     /// `None` when the compositor lacks wp-fractional-scale/wp-viewporter.
     viewport: Option<WpViewport>,
@@ -105,6 +120,17 @@ struct WaylandApp {
     needs_redraw: bool,
     exit: bool,
     repaint_at: Option<Instant>,
+
+    /// First pass done; see `draw()`.
+    primed: bool,
+    /// A real scale value has been confirmed, either pre-seeded from the
+    /// target output at startup or from a scale event; see `draw()`.
+    scale_confirmed: bool,
+    /// `scale_confirmed` has held since *before* the current frame -- egui only
+    /// reflects a `set_pixels_per_point()` call in `viewport_rect()` starting the
+    /// pass *after* the one it was requested in, so the frame where scale first
+    /// becomes confirmed still computes geometry against the old (wrong) ppp.
+    scale_settled: bool,
 }
 
 pub fn run(
@@ -112,16 +138,84 @@ pub fn run(
     devices: Vec<DiscoveredDevice>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::connect_to_env()?;
-    let (globals, event_queue) = registry_queue_init::<WaylandApp>(&conn)?;
+    let (globals, mut event_queue) = registry_queue_init::<WaylandApp>(&conn)?;
     let qh = event_queue.handle();
 
     let compositor_state = CompositorState::bind(&globals, &qh)?;
     let shell = LayerShell::bind(&globals, &qh)?;
 
+    let egui_ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&egui_ctx);
+    let mut fonts = egui::FontDefinitions::default();
+    add_phosphor_to_fonts(&mut fonts);
+    egui_ctx.set_fonts(fonts);
+
+    let (ping, ping_source) = make_ping()?;
+    let ui_wake = UiWake::new(Arc::new(move || ping.ping()));
+    let settings_requested = Arc::new(AtomicBool::new(false));
+    let tray_icon = super::tray::create_tray_icon({
+        let settings_requested = settings_requested.clone();
+        let ui_wake = ui_wake.clone();
+        Arc::new(move || {
+            settings_requested.store(true, Ordering::Relaxed);
+            ui_wake.request_repaint();
+        })
+    });
+    let app = DesktopOverlayApp::new(settings_requested, ui_wake, settings_store, devices);
+
+    let mut state = WaylandApp {
+        registry_state: RegistryState::new(&globals),
+        output_state: OutputState::new(&globals, &qh),
+        seat_state: SeatState::new(&globals, &qh),
+        compositor_state,
+        layer: None,
+        viewport: None,
+        keyboard: None,
+        pointer: None,
+        egui_ctx,
+        app,
+        _tray: tray_icon,
+        input: InputState::default(),
+        egl: None,
+        painter: None,
+        gl: None,
+        width: 0,
+        height: 0,
+        scale: 1.0,
+        configured: false,
+        needs_redraw: false,
+        exit: false,
+        repaint_at: None,
+        primed: false,
+        scale_confirmed: false,
+        scale_settled: false,
+    };
+
+    // Roundtrip once on the main queue so output_state receives all outputs and their names.
+    event_queue.roundtrip(&mut state)?;
+    state.update_available_monitors();
+    let target_output = resolve_target_output(&state.output_state, state.app.active_monitor());
+    if let Some(scale) = target_output
+        .as_ref()
+        .and_then(|o| state.output_state.info(o))
+        .map(|info| info.scale_factor as f64)
+    {
+        if scale > 0.0 {
+            state.scale = scale;
+            state.scale_confirmed = true;
+        }
+    }
+
     // Build the overlay layer surface: above everything, covering the whole output,
     // initially interactive because the settings window opens on first launch.
-    let surface = compositor_state.create_surface(&qh);
-    let layer = shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("keypeek"), None);
+    let surface = state.compositor_state.create_surface(&qh);
+    let layer = shell.create_layer_surface(
+        &qh,
+        surface,
+        Layer::Overlay,
+        Some("keypeek"),
+        target_output.as_ref(),
+    );
     layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_exclusive_zone(-1);
     layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
@@ -144,6 +238,9 @@ pub fn run(
         _ => None,
     };
 
+    state.layer = Some(layer);
+    state.viewport = viewport;
+
     // calloop loop, plus a ping the worker threads use to request repaints.
     let mut event_loop: EventLoop<WaylandApp> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
@@ -151,55 +248,11 @@ pub fn run(
         .insert(loop_handle.clone())
         .map_err(|e| format!("failed to insert Wayland event source: {e}"))?;
 
-    let (ping, ping_source) = make_ping()?;
     loop_handle
         .insert_source(ping_source, |_, _, app: &mut WaylandApp| {
             app.needs_redraw = true;
         })
         .map_err(|e| format!("failed to insert repaint ping source: {e}"))?;
-
-    let egui_ctx = egui::Context::default();
-    egui_extras::install_image_loaders(&egui_ctx);
-    let mut fonts = egui::FontDefinitions::default();
-    add_phosphor_to_fonts(&mut fonts);
-    egui_ctx.set_fonts(fonts);
-
-    let ui_wake = UiWake::new(Arc::new(move || ping.ping()));
-    let settings_requested = Arc::new(AtomicBool::new(false));
-    let tray_icon = super::tray::create_tray_icon({
-        let settings_requested = settings_requested.clone();
-        let ui_wake = ui_wake.clone();
-        Arc::new(move || {
-            settings_requested.store(true, Ordering::Relaxed);
-            ui_wake.request_repaint();
-        })
-    });
-    let app = DesktopOverlayApp::new(settings_requested, ui_wake, settings_store, devices);
-
-    let mut state = WaylandApp {
-        registry_state: RegistryState::new(&globals),
-        output_state: OutputState::new(&globals, &qh),
-        seat_state: SeatState::new(&globals, &qh),
-        compositor_state,
-        layer,
-        viewport,
-        keyboard: None,
-        pointer: None,
-        egui_ctx,
-        app,
-        _tray: tray_icon,
-        input: InputState::default(),
-        egl: None,
-        painter: None,
-        gl: None,
-        width: 0,
-        height: 0,
-        scale: 1.0,
-        configured: false,
-        needs_redraw: false,
-        exit: false,
-        repaint_at: None,
-    };
 
     while !state.exit {
         // Sleep until the next scheduled repaint; wake immediately when a redraw is
@@ -228,6 +281,19 @@ pub fn run(
 }
 
 impl WaylandApp {
+    fn layer(&self) -> &LayerSurface {
+        self.layer.as_ref().expect("layer surface initialized")
+    }
+
+    fn update_available_monitors(&mut self) {
+        let monitor_names: Vec<String> = self
+            .output_state
+            .outputs()
+            .filter_map(|o| self.output_state.info(&o).and_then(|i| i.name))
+            .collect();
+        self.app.set_available_monitors(monitor_names);
+    }
+
     fn size_px(&self) -> [u32; 2] {
         [
             (self.width as f64 * self.scale).round().max(1.0) as u32,
@@ -243,7 +309,9 @@ impl WaylandApp {
             // logical surface size.
             viewport.set_destination(self.width.max(1), self.height.max(1));
         } else {
-            self.layer.wl_surface().set_buffer_scale(self.scale as i32);
+            self.layer()
+                .wl_surface()
+                .set_buffer_scale(self.scale as i32);
         }
 
         // Already initialized: just resize the EGL window.
@@ -253,7 +321,7 @@ impl WaylandApp {
         }
 
         // First-time setup.
-        let surface = self.layer.wl_surface();
+        let surface = self.layer().wl_surface();
         match EglState::new(conn, surface, w as i32, h as i32) {
             Ok(egl) => {
                 let gl = egl.gl.clone();
@@ -282,6 +350,28 @@ impl WaylandApp {
         self.egui_ctx.set_pixels_per_point(self.scale as f32);
         let raw_input = self.input.take_raw_input((self.width, self.height));
 
+        // ctx.viewport_rect() is bogus on the first hand-driven egui pass (the
+        // compositor hasn't delivered a real configure/preferred_scale yet), so the
+        // settings window's one-shot default_pos would bake in a wrong center and
+        // never recover. Hide it until both the first pass is behind us AND we know
+        // the real scale: on `MonitorSelection::Primary` nothing pre-seeds `scale`,
+        // so `configure()` (and thus this first `draw()` call) can land before the
+        // fractional-scale event does -- one suppressed frame isn't always enough.
+        // And even once confirmed, `set_pixels_per_point()` above only reaches
+        // `viewport_rect()` starting the *next* pass, so the frame scale is first
+        // confirmed in still computes against the old ppp -- read `scale_settled`
+        // before updating it so that frame stays suppressed too.
+        let was_settled = self.scale_settled;
+        if self.scale_confirmed {
+            self.scale_settled = true;
+        }
+        let suppress_settings_this_frame = !self.primed || !was_settled;
+        self.primed = true;
+        let was_settings_visible = self.app.ui.settings_visible;
+        if suppress_settings_this_frame {
+            self.app.ui.settings_visible = false;
+        }
+
         let ctx = self.egui_ctx.clone();
         let mut host = WaylandHost::default();
         let mut full_output = {
@@ -290,6 +380,10 @@ impl WaylandApp {
             app.ui(&ctx, &mut host);
             ctx.end_pass()
         };
+        if suppress_settings_this_frame {
+            self.app.ui.settings_visible = was_settings_visible;
+            self.needs_redraw = true;
+        }
 
         let clear = self.app.clear_color().to_array();
         let primitives = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
@@ -327,18 +421,18 @@ impl WaylandApp {
 
     /// Toggle click-through + focus to match the eframe `MousePassthrough` behavior.
     fn apply_passthrough(&mut self, passthrough: bool) {
-        let surface = self.layer.wl_surface();
+        let surface = self.layer().wl_surface();
         if passthrough {
             // An empty input region makes every pointer/touch event fall through.
             if let Ok(region) = Region::new(&self.compositor_state) {
                 surface.set_input_region(Some(region.wl_region()));
             }
-            self.layer
+            self.layer()
                 .set_keyboard_interactivity(KeyboardInteractivity::None);
         } else {
             // `None` input region = the whole surface receives input again.
             surface.set_input_region(None);
-            self.layer
+            self.layer()
                 .set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
         }
         surface.commit();
@@ -358,9 +452,11 @@ impl CompositorHandler for WaylandApp {
             return;
         }
         let new_factor = new_factor as f64;
-        if new_factor != self.scale && new_factor > 0.0 {
+        if new_factor > 0.0 {
+            let changed = new_factor != self.scale;
             self.scale = new_factor;
-            if self.configured {
+            self.scale_confirmed = true;
+            if changed && self.configured {
                 self.init_or_resize_gl(conn);
                 self.needs_redraw = true;
             }
@@ -612,8 +708,12 @@ impl OutputHandler for WaylandApp {
     }
 
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlOutput) {}
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlOutput) {
+        self.update_available_monitors();
+    }
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlOutput) {
+        self.update_available_monitors();
+    }
 }
 
 impl Dispatch<WpFractionalScaleV1, ()> for WaylandApp {
@@ -628,9 +728,11 @@ impl Dispatch<WpFractionalScaleV1, ()> for WaylandApp {
         // The compositor reports the preferred scale in 120ths.
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
             let new_scale = scale as f64 / 120.0;
-            if new_scale > 0.0 && new_scale != state.scale {
+            if new_scale > 0.0 {
+                let changed = new_scale != state.scale;
                 state.scale = new_scale;
-                if state.configured {
+                state.scale_confirmed = true;
+                if changed && state.configured {
                     state.init_or_resize_gl(conn);
                     state.needs_redraw = true;
                 }
