@@ -2708,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "keypeek-core"
-version = "0.11.0"
+version = "0.11.0-personal"
 dependencies = [
  "egui-phosphor",
  "serde",
@@ -2717,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "keypeek-desktop"
-version = "0.11.0"
+version = "0.11.0-personal"
 dependencies = [
  "eframe",
  "egui 0.36.1",
@@ -2746,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "keypeek-presentation"
-version = "0.11.0"
+version = "0.11.0-personal"
 dependencies = [
  "directories",
  "egui 0.36.1",
@@ -2760,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "keypeek-protocol"
-version = "0.11.0"
+version = "0.11.0-personal"
 dependencies = [
  "directories",
  "egui-phosphor",
@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "keypeek-web"
-version = "0.11.0"
+version = "0.11.0-personal"
 dependencies = [
  "console_error_panic_hook",
  "eframe",

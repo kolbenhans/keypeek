@@ -149,6 +149,19 @@ impl Keyboard {
         self.domain.overlay_changes_in(now)
     }
 
+    pub fn get_effective_encoder_layer(&self, id: u8) -> (u8, bool) {
+        self.domain.get_effective_encoder_layer(id)
+    }
+
+    pub fn get_encoder_display_key(
+        &self,
+        layer: usize,
+        id: u8,
+        direction: keypeek_core::EncoderDirection,
+    ) -> LayoutKey {
+        self.domain.get_encoder_display_key(layer, id, direction)
+    }
+
     pub fn get_effective_key_layer(&self, row: usize, col: usize) -> (u8, bool) {
         self.domain.get_effective_key_layer(row, col)
     }

@@ -1,5 +1,5 @@
-use keypeek_presentation::{add_phosphor_to_fonts, DesktopOverlayApp, OverlayHost, SettingsStore};
 use keypeek_presentation::MonitorSelection;
+use keypeek_presentation::{add_phosphor_to_fonts, DesktopOverlayApp, OverlayHost, SettingsStore};
 use keypeek_protocol::{DiscoveredDevice, UiWake};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

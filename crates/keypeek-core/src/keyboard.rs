@@ -317,4 +317,47 @@ pub(crate) mod tests {
         assert!(err.is_err());
         assert_eq!(domain.active_layout_name(), "Alternative");
     }
+
+    fn domain_with_encoders(
+        encoder_keys: Vec<Vec<(Option<LayoutKey>, Option<LayoutKey>)>>,
+    ) -> KeyboardDomain {
+        let base = create_test_domain();
+        KeyboardDomain {
+            encoder_keys,
+            ..base
+        }
+    }
+
+    fn bound(keycode: &str) -> Option<LayoutKey> {
+        Some(LayoutKey {
+            tap: crate::layout_key::Label::new(keycode),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn effective_encoder_layer_falls_through_transparent_layers() {
+        // Layer 0 bound, layer 1 transparent, layer 2 bound; layer 2 held -> wins outright.
+        let domain = domain_with_encoders(vec![
+            vec![(bound("KC_VOLD"), bound("KC_VOLU"))],
+            vec![(None, None)],
+            vec![(bound("KC_LEFT"), bound("KC_RGHT"))],
+        ]);
+        domain.on_layers_changed(1 << 2, 0, Instant::now());
+
+        assert_eq!(domain.get_effective_encoder_layer(0), (2, false));
+        assert_eq!(
+            domain.get_encoder_key(2, 0, true).unwrap().tap.full,
+            "KC_RGHT"
+        );
+    }
+
+    #[test]
+    fn effective_encoder_layer_falls_back_to_base_when_nothing_held() {
+        let domain = domain_with_encoders(vec![
+            vec![(bound("KC_VOLD"), bound("KC_VOLU"))],
+            vec![(None, None)],
+        ]);
+        assert_eq!(domain.get_effective_encoder_layer(0), (0, false));
+    }
 }
