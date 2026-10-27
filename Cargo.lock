@@ -890,6 +890,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "const-random"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2676,9 +2686,9 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.104"
+version = "0.3.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e0c1080212aad755ea003d18543e8768dd432c48819efd73a7bf1e39b7a5a3a"
+checksum = "ce57d20d1ea864ce2ac172ab472d409214f4fd359f0b2a2775abdf522e2af99e"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -2697,39 +2707,104 @@ dependencies = [
 ]
 
 [[package]]
-name = "keypeek"
-version = "0.10.0"
+name = "keypeek-core"
+version = "0.11.0-personal"
 dependencies = [
- "directories",
+ "egui-phosphor",
+ "serde",
+ "web-time",
+]
+
+[[package]]
+name = "keypeek-desktop"
+version = "0.11.0-personal"
+dependencies = [
  "eframe",
  "egui 0.36.1",
- "egui-file-dialog",
- "egui-phosphor",
  "egui_extras",
  "egui_glow",
  "gtk",
- "hidapi",
  "image",
+ "keypeek-presentation",
+ "keypeek-protocol",
  "khronos-egl",
- "lzma-rs",
+ "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
- "qmk-via-api",
  "raw-window-handle",
- "rust-ini",
- "serde",
- "serde_json",
- "serialport",
  "smithay-client-toolkit 0.21.1",
  "tray-icon",
  "wayland-client",
  "wayland-egl",
+ "web-time",
  "windows 0.62.2",
  "winit",
  "winreg",
  "winresource",
  "x11rb 0.14.0",
  "xkbcommon 0.9.0",
+]
+
+[[package]]
+name = "keypeek-presentation"
+version = "0.11.0-personal"
+dependencies = [
+ "directories",
+ "egui 0.36.1",
+ "egui-file-dialog",
+ "egui-phosphor",
+ "keypeek-core",
+ "keypeek-protocol",
+ "rust-ini",
+ "web-time",
+]
+
+[[package]]
+name = "keypeek-protocol"
+version = "0.11.0-personal"
+dependencies = [
+ "directories",
+ "egui-phosphor",
+ "futures-channel",
+ "futures-util",
+ "hidapi",
+ "js-sys",
+ "keypeek-core",
+ "log",
+ "lzma-rs",
+ "prost",
+ "qmk-via-api",
+ "serde",
+ "serde_json",
+ "serialport",
+ "ureq",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wayland-client",
+ "web-sys",
+ "web-time",
+ "windows 0.62.2",
+ "x11rb 0.14.0",
+ "xkbcommon 0.9.0",
  "zmk-studio-api",
+]
+
+[[package]]
+name = "keypeek-web"
+version = "0.11.0-personal"
+dependencies = [
+ "console_error_panic_hook",
+ "eframe",
+ "egui 0.36.1",
+ "egui-phosphor",
+ "egui_extras",
+ "js-sys",
+ "keypeek-presentation",
+ "keypeek-protocol",
+ "log",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -4302,9 +4377,9 @@ dependencies = [
 
 [[package]]
 name = "qmk-via-api"
-version = "0.9.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53c2d37fb76cbe950db5fdedae305d4be6bd82f83ce46ff773e59db01fd1880d"
+checksum = "3b60cbfa767279f62191b2c5f67218981d18c11e0552aa92c77540a441d36ab8"
 dependencies = [
  "hidapi",
  "itertools 0.15.0",
@@ -4846,9 +4921,9 @@ dependencies = [
 
 [[package]]
 name = "serialport"
-version = "4.10.0"
+version = "4.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a2f4ac56b5d3af3c40fbbee17be96d532cba02fa5853926aacdb77d926272ab"
+checksum = "6ba5f8f29aa20853c4e3e85a33ec580eb66be1f057142e77a333834a318bacf2"
 dependencies = [
  "bitflags 2.13.0",
  "cfg-if",
@@ -5833,9 +5908,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.127"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b70935747edd64d89de3efa29d73789b806c15798f8e7dca4d8ac356b50ce70"
+checksum = "aecb87a33d3b0c5e3b7aa46336eaf486cffafbd281b195e4c8b80d50df2351bf"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -5846,9 +5921,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.77"
+version = "0.4.78"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b7777d5cc23d0e91404e53ce2d5e8ec7acae3026b16233dba62cd3246457950"
+checksum = "6ef4c5d3d2cdf5c54f4231181768f5510842e350db025faf1f7163b1030ed928"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -5856,9 +5931,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.127"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77775f8f3f7217702089053b94958f8f54061a3f663417df76e19cbdcca29bc1"
+checksum = "a690d511e3c1a8b3a55e33511e3c2c00c78415cd23650f32b808627f5696b9ed"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -5866,22 +5941,22 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.127"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11d33f857dc2fb11b8bc75aee111aa9cbeb12cd9f25efd3d4c2a3dd4e235284"
+checksum = "411e4887f0071ef2d2164a9d5fdf2d20efbef78fccd3a78b0c10a1dc5295e48a"
 dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn 2.0.110",
+ "syn 3.0.3",
  "wasm-bindgen-shared",
 ]
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.127"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ef64dbcc55df09c7e5a46182d181c2cfa3e925f3da937ea764728b4bbb9dcbf"
+checksum = "81941cd78d0c92026c33e5e01312845a4cb1e9af3407f9134b100dd03144103e"
 dependencies = [
  "unicode-ident",
 ]
@@ -6046,9 +6121,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.104"
+version = "0.3.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c435338968042f4f59a557f690a253676d47ce13ceb55d70100e7facf6620a30"
+checksum = "9fbddc4a036f00ec4f18c83445bd3115cb306a91da554919a099d9222fe4a7f8"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -7186,9 +7261,9 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zmk-studio-api"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb099dfd4acabf4c64439fa8756402c00f6cf7aeb5482fef7ac50bace5a62b71"
+checksum = "ee5a8e4303fae7dc421de12c033adabe5501ecfd001f9d577ed8359d77b1a3d2"
 dependencies = [
  "bluest",
  "futures",
@@ -7202,6 +7277,7 @@ dependencies = [
  "strum 0.28.0",
  "strum_macros 0.28.0",
  "tokio",
+ "web-time",
 ]
 
 [[package]]

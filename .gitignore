@@ -27,7 +27,8 @@ Session.vim
 
 ## Tool
 .valgrindrc
-.cargo
+.cargo/*
+!.cargo/config.toml
 # Included because it is part of the test case
 !/tests/run-make/thumb-none-qemu/example/.cargo
 .direnv
@@ -85,3 +86,4 @@ package.json
 tests/rustdoc-gui/src/**.lock
 
 # Before adding new lines, see the comment at the top.
+libs/

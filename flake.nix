@@ -110,6 +110,7 @@
       keypeek = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
+          doCheck = false;
         }
         // {
           nativeBuildInputs = [pkgs.makeWrapper];
@@ -155,13 +156,12 @@
         #};
 
         # Run tests with cargo-nextest
-        # Consider setting `doCheck = false` on `keypeek` if you do not want
-        # the tests to run twice
         keypeek-nextest = craneLib.cargoNextest (commonArgs
           // {
             inherit cargoArtifacts;
             partitions = 1;
             partitionType = "count";
+            cargoNextestExtraArgs = "--workspace --no-tests=pass";
           });
 
         pre-commit-check = pre-commit.lib.${system}.run {

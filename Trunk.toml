@@ -1,0 +1,10 @@
+[build]
+target = "index.html"
+
+[watch]
+watch = ["crates", "resources", "index.html"]
+ignore = ["target"]
+
+[serve]
+port = 8080
+open = false
