@@ -11,6 +11,35 @@ use std::sync::RwLock;
 #[derive(Debug)]
 pub struct ParseSettingsError;
 
+// Persisted by name, not index — indices shift when displays change, names don't.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum MonitorSelection {
+    #[default]
+    Primary,
+    Named(String),
+}
+
+impl fmt::Display for MonitorSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MonitorSelection::Primary => write!(f, "Primary"),
+            MonitorSelection::Named(name) => write!(f, "{name}"),
+        }
+    }
+}
+
+impl FromStr for MonitorSelection {
+    type Err = ParseSettingsError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(if value == "Primary" {
+            MonitorSelection::Primary
+        } else {
+            MonitorSelection::Named(value.to_string())
+        })
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WindowPosition {
     TopLeft,
@@ -264,6 +293,7 @@ pub struct Settings {
     pub visible_layers: LayerMask,
     pub theme: ThemeSettings,
     pub legend_mode: LegendMode,
+    pub monitor: MonitorSelection,
 }
 
 impl Default for Settings {
@@ -282,6 +312,7 @@ impl Default for Settings {
             visible_layers: LayerMask::ALL,
             theme: ThemeSettings::default(),
             legend_mode: LegendMode::Stacked,
+            monitor: MonitorSelection::default(),
         }
     }
 }
@@ -326,6 +357,7 @@ impl Settings {
         }
         section.set("font_color", self.theme.font_color.to_string());
         section.set("legend_mode", self.legend_mode.to_string());
+        section.set("monitor", self.monitor.to_string());
         conf
     }
 
@@ -387,6 +419,11 @@ impl Settings {
         if let Some(val) = section.get("legend_mode") {
             if let Ok(parsed) = val.parse() {
                 s.legend_mode = parsed;
+            }
+        }
+        if let Some(val) = section.get("monitor") {
+            if let Ok(parsed) = val.parse() {
+                s.monitor = parsed;
             }
         }
         Some(s)

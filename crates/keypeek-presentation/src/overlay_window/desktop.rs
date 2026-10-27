@@ -22,6 +22,7 @@ pub struct DesktopOverlayApp {
     pub(super) settings_requested: Arc<AtomicBool>,
     pub core: KeyPeekAppCore,
     pub(super) file_dialog: egui_file_dialog::FileDialog,
+    pub(super) available_monitors: Vec<String>,
     pub(super) mouse_passthrough: Option<bool>,
 }
 
@@ -43,6 +44,16 @@ impl std::ops::DerefMut for DesktopOverlayApp {
 }
 
 impl DesktopOverlayApp {
+    pub fn active_monitor(&self) -> &crate::settings::MonitorSelection {
+        &self.settings.active.monitor
+    }
+
+    pub fn set_available_monitors(&mut self, names: Vec<String>) {
+        if self.available_monitors != names {
+            self.available_monitors = names;
+        }
+    }
+
     pub fn new(
         settings_requested: Arc<AtomicBool>,
         ui_wake: UiWake,
@@ -53,6 +64,7 @@ impl DesktopOverlayApp {
             settings_requested,
             core: KeyPeekAppCore::new(ui_wake, settings_store, available_devices, true),
             file_dialog: egui_file_dialog::FileDialog::new(),
+            available_monitors: Vec::new(),
             mouse_passthrough: None,
         }
     }

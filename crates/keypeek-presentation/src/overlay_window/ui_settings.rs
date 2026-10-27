@@ -1,6 +1,8 @@
 use super::DesktopOverlayApp;
 use crate::overlay_host::OverlayHost;
-use crate::settings::{LayerMask, LegendMode, Settings, ThemeColor, ThemeSettings, WindowPosition};
+use crate::settings::{
+    LayerMask, LegendMode, MonitorSelection, Settings, ThemeColor, ThemeSettings, WindowPosition,
+};
 use crate::ui_widgets::{github_link, titled_group, version_link};
 use egui::Window;
 
@@ -212,6 +214,33 @@ impl DesktopOverlayApp {
                                     }
                                 });
                             ui.end_row();
+
+                            let monitors = self.available_monitors.clone();
+                            ui.label("Monitor");
+                            egui::ComboBox::from_id_salt("monitor_combo")
+                                .width(ui.available_width())
+                                .selected_text(self.settings.draft.monitor.to_string())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.settings.draft.monitor,
+                                        MonitorSelection::Primary,
+                                        "Primary",
+                                    );
+                                    for name in &monitors {
+                                        ui.selectable_value(
+                                            &mut self.settings.draft.monitor,
+                                            MonitorSelection::Named(name.clone()),
+                                            name,
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+
+                            if monitors.is_empty() {
+                                ui.label("");
+                                ui.small("Only \"Primary\" is available on this display server.");
+                                ui.end_row();
+                            }
 
                             ui.label("Display duration");
                             let mut timeout_ui =
