@@ -1,5 +1,5 @@
 use keypeek_core::geometry::flattened_top_left_after_center_rotation;
-use keypeek_core::{Key, KeyboardDefinition, KeyboardLayout};
+use keypeek_core::{EncoderDirection, EncoderTile, Key, KeyboardDefinition, KeyboardLayout};
 use serde_json::Value;
 use std::error::Error;
 
@@ -36,11 +36,11 @@ pub fn parse_kle_definition(
         .and_then(|v| v.as_u64())
         .ok_or_else(|| Box::<dyn Error>::from("No 'cols' in matrix"))? as usize;
 
-    let keys = parse_kle_keymap(keymap)?;
+    let (keys, encoders) = parse_kle_keymap(keymap)?;
 
     let layout = KeyboardLayout {
         name: "default".to_string(),
-        encoders: Vec::new(),
+        encoders,
         keys,
     };
 
@@ -347,8 +347,17 @@ fn parse_via_keys(raw_keys: &[Value]) -> Result<Vec<Key>, Box<dyn Error>> {
     Ok(keys)
 }
 
-fn parse_kle_keymap(keymap: &[Value]) -> Result<Vec<Key>, Box<dyn Error>> {
+struct RawEncoderTile {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+}
+
+fn parse_kle_keymap(keymap: &[Value]) -> Result<(Vec<Key>, Vec<EncoderTile>), Box<dyn Error>> {
     let mut keys = Vec::new();
+    let mut raw_encoders = Vec::new();
     let mut current_y: f32 = 0.0;
     let mut rotation_angle: f32 = 0.0;
     let mut rotation_x: f32 = 0.0;
@@ -400,21 +409,28 @@ fn parse_kle_keymap(keymap: &[Value]) -> Result<Vec<Key>, Box<dyn Error>> {
                     current_y += y as f32;
                 }
             } else if let Some(label) = item.as_str() {
-                // This is a key with a label
-                if let Some((row, col)) = parse_matrix_label(label) {
-                    // Normalize KLE-relative coordinates to absolute space, then flatten rotation.
-                    let absolute_x = rotation_x + current_x;
-                    let absolute_y = rotation_y + current_y;
-                    let (final_x, final_y) = flattened_top_left_after_center_rotation(
-                        absolute_x,
-                        absolute_y,
-                        current_w,
-                        current_h,
-                        rotation_angle,
-                        rotation_x,
-                        rotation_y,
-                    );
+                // Normalize KLE-relative coordinates to absolute space, then flatten rotation.
+                let absolute_x = rotation_x + current_x;
+                let absolute_y = rotation_y + current_y;
+                let (final_x, final_y) = flattened_top_left_after_center_rotation(
+                    absolute_x,
+                    absolute_y,
+                    current_w,
+                    current_h,
+                    rotation_angle,
+                    rotation_x,
+                    rotation_y,
+                );
 
+                if is_encoder_label(label) {
+                    raw_encoders.push(RawEncoderTile {
+                        x: final_x,
+                        y: final_y,
+                        w: current_w,
+                        h: current_h,
+                        r: rotation_angle,
+                    });
+                } else if let Some((row, col)) = parse_matrix_label(label) {
                     keys.push(Key {
                         row,
                         col,
@@ -436,7 +452,44 @@ fn parse_kle_keymap(keymap: &[Value]) -> Result<Vec<Key>, Box<dyn Error>> {
         current_y += 1.0;
     }
 
-    Ok(keys)
+    let encoders = group_encoder_tiles(raw_encoders);
+
+    Ok((keys, encoders))
+}
+
+/// Vial draws one encoder as two stacked 1u cells.
+fn group_encoder_tiles(raw: Vec<RawEncoderTile>) -> Vec<EncoderTile> {
+    let mut column_xs: Vec<f32> = raw.iter().map(|t| t.x).collect();
+    column_xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    column_xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+
+    raw.iter()
+        .map(|t| {
+            let id = column_xs
+                .iter()
+                .position(|&x| (x - t.x).abs() < 0.01)
+                .unwrap_or(0) as u8;
+            let is_topmost = raw.iter().all(|o| (o.x - t.x).abs() >= 0.01 || o.y >= t.y);
+            EncoderTile {
+                id,
+                direction: if is_topmost {
+                    EncoderDirection::Clockwise
+                } else {
+                    EncoderDirection::CounterClockwise
+                },
+                x: t.x,
+                y: t.y,
+                w: t.w,
+                h: t.h,
+                r: t.r,
+            }
+        })
+        .collect()
+}
+
+/// Vial's KLE convention for a rotation-only cell: label's last line is "e".
+fn is_encoder_label(label: &str) -> bool {
+    label.lines().last() == Some("e")
 }
 
 fn parse_matrix_label(label: &str) -> Option<(usize, usize)> {
@@ -450,4 +503,42 @@ fn parse_matrix_label(label: &str) -> Option<(usize, usize)> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod encoder_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn is_encoder_label_matches_vials_e_convention() {
+        assert!(is_encoder_label("0,0\ne"));
+        assert!(is_encoder_label("e"));
+        assert!(!is_encoder_label("0,0"));
+        assert!(!is_encoder_label(""));
+    }
+
+    #[test]
+    fn stacked_encoder_cells_share_an_id_topmost_is_clockwise() {
+        let keymap = json!([["e"], ["e"], ["0,0"],]);
+        let keymap = keymap.as_array().unwrap();
+        let (keys, encoders) = parse_kle_keymap(keymap).unwrap();
+
+        assert_eq!(keys.len(), 1, "the one real matrix key must still parse");
+        assert_eq!(encoders.len(), 2);
+        assert_eq!(
+            encoders[0].id, encoders[1].id,
+            "both tiles share one encoder id"
+        );
+
+        let clockwise_tile = encoders
+            .iter()
+            .find(|e| e.direction == EncoderDirection::Clockwise)
+            .unwrap();
+        let other = encoders
+            .iter()
+            .find(|e| e.direction == EncoderDirection::CounterClockwise)
+            .unwrap();
+        assert!(clockwise_tile.y < other.y);
+    }
 }
