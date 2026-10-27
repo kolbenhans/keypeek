@@ -292,6 +292,7 @@ impl QmkProtocol {
             definition.pid,
             stop_signal.clone(),
         )
+        .map_err(|e| log::warn!("QMK event subscription failed: {e}"))
         .ok();
 
         let (event_rx, keepalive) = match subscription {

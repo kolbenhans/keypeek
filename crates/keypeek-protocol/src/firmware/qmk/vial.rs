@@ -39,8 +39,12 @@ impl VialProtocol {
             ));
         }
 
-        let definition = Self::fetch_definition(&api, vid, pid)
+        let mut definition = Self::fetch_definition(&api, vid, pid)
             .map_err(|e| DeviceError::Protocol(e.to_string()))?;
+        // The embedded vial.json may carry a different productId than the USB device;
+        // the raw HID interface must be looked up by the real ids.
+        definition.vid = vid;
+        definition.pid = pid;
         let features = QmkFeatures::probe(&api);
 
         Ok(QmkProtocol::new(
