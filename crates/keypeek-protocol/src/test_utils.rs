@@ -85,6 +85,7 @@ pub fn default_test_definition() -> KeyboardDefinition {
         layouts: vec![
             KeyboardLayout {
                 name: "Default".to_string(),
+                encoders: Vec::new(),
                 keys: vec![
                     Key {
                         row: 0,
@@ -108,6 +109,7 @@ pub fn default_test_definition() -> KeyboardDefinition {
             },
             KeyboardLayout {
                 name: "Alternative".to_string(),
+                encoders: Vec::new(),
                 keys: vec![],
             },
         ],
@@ -169,7 +171,14 @@ pub fn create_test_domain() -> KeyboardDomain {
         activation_delay_ms: 300,
         visible_layers: u32::MAX,
     };
-    KeyboardDomain::new(definition, "Default".to_string(), layout, matrix, config)
+    KeyboardDomain::new(
+        definition,
+        "Default".to_string(),
+        layout,
+        matrix,
+        Vec::new(),
+        config,
+    )
 }
 
 /// Constructs a dummy `ConnectionSpec` for unit tests.

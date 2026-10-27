@@ -1,4 +1,4 @@
-use super::common::{QmkFeatures, QmkProtocol};
+use super::common::{EncoderSource, QmkFeatures, QmkProtocol};
 use crate::protocols::DeviceError;
 use qmk_via_api::api::KeyboardApi;
 
@@ -10,7 +10,12 @@ impl ViaProtocol {
         let api = Self::get_api(definition.vid, definition.pid)?;
         let features = QmkFeatures::probe(&api);
 
-        Ok(QmkProtocol::new(api, definition, features))
+        Ok(QmkProtocol::new(
+            api,
+            definition,
+            features,
+            EncoderSource::Via,
+        ))
     }
 
     fn get_api(vid: u16, pid: u16) -> Result<KeyboardApi, DeviceError> {

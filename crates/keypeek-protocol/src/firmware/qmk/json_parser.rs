@@ -32,6 +32,7 @@ pub fn parse_qmk_json_value(json: &Value) -> Result<KeyboardDefinition, Box<dyn 
         let keys = collect_layout_keys(raw_layout)?;
         let layout = KeyboardLayout {
             name: layout_name.clone(),
+            encoders: Vec::new(),
             keys,
         };
         layouts.push(layout);
@@ -202,6 +203,7 @@ pub fn parse_layout_json_str(
                 if !keys.is_empty() {
                     parsed_layouts.push(KeyboardLayout {
                         name: layout_name.clone(),
+                        encoders: Vec::new(),
                         keys,
                     });
                 }

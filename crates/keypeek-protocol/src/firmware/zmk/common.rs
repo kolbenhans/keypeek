@@ -182,6 +182,7 @@ pub fn build_from_zmk_data(vid: u16, pid: u16, data: ZmkData) -> Result<ZmkLayou
         cols: num_keys,
         layouts: vec![KeyboardLayout {
             name: ACTIVE_LAYOUT_NAME.to_string(),
+            encoders: Vec::new(),
             keys: active_keys,
         }],
     };

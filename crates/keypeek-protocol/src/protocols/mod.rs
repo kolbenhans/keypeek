@@ -257,6 +257,16 @@ pub trait KeyboardProtocol: Send {
 
     fn read_keymap(&self) -> Result<KeymapSnapshot, DeviceError>;
 
+    /// `[layer][encoder_id] -> (ccw, cw)`. Default-empty: only Vial and VIA expose a
+    /// real query for this.
+    fn read_all_encoders(
+        &self,
+        _layers: usize,
+        _encoder_count: usize,
+    ) -> Vec<Vec<(Option<KeySpec>, Option<KeySpec>)>> {
+        Vec::new()
+    }
+
     /// Subscribes to layer-state and key-press events from the device.
     fn subscribe_events(&mut self) -> Result<EventSubscription, DeviceError>;
 

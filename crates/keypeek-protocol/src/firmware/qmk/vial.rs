@@ -1,4 +1,4 @@
-use super::common::{QmkFeatures, QmkProtocol};
+use super::common::{EncoderSource, QmkFeatures, QmkProtocol};
 use super::kle_parser;
 use crate::protocols::DeviceError;
 use keypeek_core::KeyboardDefinition;
@@ -43,7 +43,12 @@ impl VialProtocol {
             .map_err(|e| DeviceError::Protocol(e.to_string()))?;
         let features = QmkFeatures::probe(&api);
 
-        Ok(QmkProtocol::new(api, definition, features))
+        Ok(QmkProtocol::new(
+            api,
+            definition,
+            features,
+            EncoderSource::Vial,
+        ))
     }
 
     fn vial_command(

@@ -6,7 +6,7 @@ use web_time::Instant;
 
 use crate::key_matrix::KeyMatrix;
 use crate::key_spec::{KeySpec, LayerInfo};
-use crate::layout::{KeyboardDefinition, KeyboardLayout};
+use crate::layout::{EncoderDirection, KeyboardDefinition, KeyboardLayout};
 use crate::layout_key::LayoutKey;
 use crate::visibility::{OverlayConfig, VisibilityStateMachine};
 
@@ -17,6 +17,9 @@ pub struct KeyboardDomain {
     active_layout_name: Mutex<String>,
     layout: Mutex<KeyboardLayout>,
     matrix: Mutex<KeyMatrix>,
+    /// `[layer][encoder_id] -> (ccw, cw)`. Populated once at connect time; there is
+    /// no live encoder-rotation event to keep it in sync.
+    encoder_keys: Vec<Vec<(Option<LayoutKey>, Option<LayoutKey>)>>,
     layer_state: Mutex<u32>,
     default_layer_state: Mutex<u32>,
     visibility: Mutex<VisibilityStateMachine>,
@@ -28,6 +31,7 @@ impl KeyboardDomain {
         active_layout_name: String,
         layout: KeyboardLayout,
         matrix: KeyMatrix,
+        encoder_keys: Vec<Vec<(Option<LayoutKey>, Option<LayoutKey>)>>,
         config: OverlayConfig,
     ) -> Self {
         Self {
@@ -35,6 +39,7 @@ impl KeyboardDomain {
             active_layout_name: Mutex::new(active_layout_name),
             layout: Mutex::new(layout),
             matrix: Mutex::new(matrix),
+            encoder_keys,
             layer_state: Mutex::new(0),
             default_layer_state: Mutex::new(0),
             visibility: Mutex::new(VisibilityStateMachine::new(config, Instant::now())),
@@ -105,6 +110,68 @@ impl KeyboardDomain {
             .unwrap()
             .get_key(layer, row, col)
             .cloned()
+    }
+
+    /// Mirrors `get_effective_key_layer` for encoders.
+    pub fn get_effective_encoder_layer(&self, id: u8) -> (u8, bool) {
+        let layer_state = *self.layer_state.lock().unwrap();
+        let default_layer_state = *self.default_layer_state.lock().unwrap();
+        let num_layers = self.encoder_keys.len().min(32);
+
+        let mut active_layer_above = false;
+
+        for i in (1..num_layers).rev() {
+            let layer_mask = 1u32 << (i as u32);
+            let is_active_default_layer = (default_layer_state & layer_mask) != 0;
+            let is_active_momentary_layer = (layer_state & layer_mask) != 0;
+            if (is_active_momentary_layer || is_active_default_layer)
+                && !self.is_encoder_transparent(i, id)
+            {
+                return (i as u8, is_active_default_layer && active_layer_above);
+            }
+            active_layer_above |= is_active_momentary_layer;
+        }
+
+        (0, active_layer_above)
+    }
+
+    fn is_encoder_transparent(&self, layer: usize, id: u8) -> bool {
+        self.encoder_keys
+            .get(layer)
+            .and_then(|l| l.get(id as usize))
+            .map(|(ccw, cw)| ccw.is_none() && cw.is_none())
+            .unwrap_or(true)
+    }
+
+    pub fn get_encoder_key(&self, layer: usize, id: u8, clockwise: bool) -> Option<LayoutKey> {
+        let (ccw, cw) = self.encoder_keys.get(layer)?.get(id as usize)?;
+        (if clockwise { cw } else { ccw }).clone()
+    }
+
+    /// `Both` (VIA's one-tile case) synthesizes a combined key reusing the
+    /// existing tap+shifted stack display.
+    pub fn get_encoder_display_key(
+        &self,
+        layer: usize,
+        id: u8,
+        direction: EncoderDirection,
+    ) -> LayoutKey {
+        match direction {
+            EncoderDirection::Clockwise => {
+                self.get_encoder_key(layer, id, true).unwrap_or_default()
+            }
+            EncoderDirection::CounterClockwise => {
+                self.get_encoder_key(layer, id, false).unwrap_or_default()
+            }
+            EncoderDirection::Both => {
+                let cw = self.get_encoder_key(layer, id, true).unwrap_or_default();
+                let ccw_text = self.get_encoder_key(layer, id, false).map(|k| k.tap.full);
+                LayoutKey {
+                    shifted: ccw_text,
+                    ..cw
+                }
+            }
+        }
     }
 
     pub fn layer_infos(&self) -> Vec<LayerInfo> {
@@ -191,10 +258,12 @@ pub(crate) mod tests {
             layouts: vec![
                 KeyboardLayout {
                     name: "Default".to_string(),
+                    encoders: Vec::new(),
                     keys: vec![],
                 },
                 KeyboardLayout {
                     name: "Alternative".to_string(),
+                    encoders: Vec::new(),
                     keys: vec![],
                 },
             ],
@@ -220,7 +289,14 @@ pub(crate) mod tests {
             activation_delay_ms: 300,
             visible_layers: u32::MAX,
         };
-        KeyboardDomain::new(definition, "Default".to_string(), layout, matrix, config)
+        KeyboardDomain::new(
+            definition,
+            "Default".to_string(),
+            layout,
+            matrix,
+            Vec::new(),
+            config,
+        )
     }
 
     #[test]

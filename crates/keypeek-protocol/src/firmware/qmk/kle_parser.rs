@@ -40,6 +40,7 @@ pub fn parse_kle_definition(
 
     let layout = KeyboardLayout {
         name: "default".to_string(),
+        encoders: Vec::new(),
         keys,
     };
 
@@ -172,6 +173,7 @@ fn build_via_layouts(base_keys: Vec<Key>, option_groups: &[ViaOptionGroup]) -> V
     if option_groups.is_empty() {
         return vec![KeyboardLayout {
             name: "default".to_string(),
+            encoders: Vec::new(),
             keys: base_keys,
         }];
     }
@@ -187,6 +189,7 @@ fn build_via_layouts(base_keys: Vec<Key>, option_groups: &[ViaOptionGroup]) -> V
     }
     layouts.push(KeyboardLayout {
         name: "default".to_string(),
+        encoders: Vec::new(),
         keys: default_keys,
     });
 
@@ -230,6 +233,7 @@ fn build_via_layouts(base_keys: Vec<Key>, option_groups: &[ViaOptionGroup]) -> V
 
             layouts.push(KeyboardLayout {
                 name: format!("VIA ({})", non_default_names.join(", ")),
+                encoders: Vec::new(),
                 keys,
             });
         }
@@ -250,6 +254,7 @@ fn build_via_layouts(base_keys: Vec<Key>, option_groups: &[ViaOptionGroup]) -> V
                 }
                 layouts.push(KeyboardLayout {
                     name: format!("VIA ({})", opt.name),
+                    encoders: Vec::new(),
                     keys,
                 });
             }

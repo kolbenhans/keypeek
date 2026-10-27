@@ -45,6 +45,22 @@ impl Keyboard {
             .map(|l| l.name.clone().unwrap_or_default())
             .collect();
 
+        let encoder_keys: Vec<Vec<(Option<LayoutKey>, Option<LayoutKey>)>> = protocol
+            .read_all_encoders(layer_names.len(), layout.encoder_count())
+            .into_iter()
+            .map(|layer| {
+                layer
+                    .into_iter()
+                    .map(|(ccw, cw)| {
+                        let present = |spec: Option<KeySpec>| {
+                            spec.and_then(|s| presenter.present_key(&s, &layer_names))
+                        };
+                        (present(ccw), present(cw))
+                    })
+                    .collect()
+            })
+            .collect();
+
         let matrix = KeyMatrix::from_snapshot(
             snapshot,
             definition.rows,
@@ -57,6 +73,7 @@ impl Keyboard {
             layout_name,
             layout,
             matrix,
+            encoder_keys,
             config,
         ));
         let session = KeyboardSession::start(

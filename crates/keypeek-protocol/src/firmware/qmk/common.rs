@@ -135,11 +135,24 @@ pub trait QmkBackend: Send {
         col: usize,
         keycode: u16,
     ) -> Result<(), DeviceError>;
+
+    /// Raw keycodes `(ccw, cw)` of one encoder on one layer; `None` where unreadable.
+    fn read_encoder(&self, _layer: u8, _id: u8) -> (Option<u16>, Option<u16>) {
+        (None, None)
+    }
+}
+
+/// Which protocol answers encoder queries: they differ between VIA and Vial.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EncoderSource {
+    Via,
+    Vial,
 }
 
 #[cfg(feature = "hidapi")]
 struct NativeQmkBackend {
     api: Arc<Mutex<KeyboardApi>>,
+    encoder_source: EncoderSource,
 }
 
 #[cfg(feature = "hidapi")]
@@ -153,6 +166,35 @@ impl QmkBackend for NativeQmkBackend {
     ) -> Result<(), DeviceError> {
         let api = self.api.lock().unwrap();
         qmk_set_key_with_retry(&api, layer, row, col, keycode)
+    }
+
+    fn read_encoder(&self, layer: u8, id: u8) -> (Option<u16>, Option<u16>) {
+        let api = self.api.lock().unwrap();
+        match self.encoder_source {
+            // VIA: one direction per call.
+            EncoderSource::Via => (
+                api.get_encoder_value(layer, id, false).ok(),
+                api.get_encoder_value(layer, id, true).ok(),
+            ),
+            // Vial: `[0xFE, 0x03, layer, id]` returns both directions big-endian.
+            EncoderSource::Vial => {
+                let mut msg = vec![0u8; 32];
+                msg[0] = 0xFE;
+                msg[1] = 0x03;
+                msg[2] = layer;
+                msg[3] = id;
+                if api.hid_send(msg).is_err() {
+                    return (None, None);
+                }
+                match api.hid_read() {
+                    Ok(r) if r.len() >= 4 => (
+                        Some(u16::from_be_bytes([r[0], r[1]])),
+                        Some(u16::from_be_bytes([r[2], r[3]])),
+                    ),
+                    _ => (None, None),
+                }
+            }
+        }
     }
 }
 
@@ -232,7 +274,12 @@ impl Drop for QmkProtocol {
 
 #[cfg(feature = "hidapi")]
 impl QmkProtocol {
-    pub fn new(api: KeyboardApi, definition: KeyboardDefinition, features: QmkFeatures) -> Self {
+    pub fn new(
+        api: KeyboardApi,
+        definition: KeyboardDefinition,
+        features: QmkFeatures,
+        encoder_source: EncoderSource,
+    ) -> Self {
         let snapshot = qmk_read_snapshot(&api, &definition).unwrap_or_else(|_| KeymapSnapshot {
             layers: LayerInfo::indexed(4),
             actions: vec![vec![vec![None; definition.cols]; definition.rows]; 4],
@@ -253,7 +300,10 @@ impl QmkProtocol {
         };
 
         Self {
-            backend: Box::new(NativeQmkBackend { api }),
+            backend: Box::new(NativeQmkBackend {
+                api,
+                encoder_source,
+            }),
             definition,
             snapshot: Mutex::new(snapshot),
             features,
@@ -307,6 +357,26 @@ impl KeyboardProtocol for QmkProtocol {
             .unwrap()
             .take()
             .ok_or_else(|| DeviceError::Protocol("Already subscribed to QMK events".to_string()))
+    }
+
+    fn read_all_encoders(
+        &self,
+        layers: usize,
+        encoder_count: usize,
+    ) -> Vec<Vec<(Option<KeySpec>, Option<KeySpec>)>> {
+        (0..layers)
+            .map(|layer| {
+                (0..encoder_count)
+                    .map(|id| {
+                        let (ccw, cw) = self.backend.read_encoder(layer as u8, id as u8);
+                        (
+                            ccw.map(qmk_codec::qmk_to_keyspec),
+                            cw.map(qmk_codec::qmk_to_keyspec),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     fn write_support(&self) -> WriteSupport {

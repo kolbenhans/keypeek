@@ -19,18 +19,58 @@ pub struct Key {
     pub r: f32,
 }
 
+/// Vial: one tile per direction. VIA: a single tile shows both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EncoderDirection {
+    Clockwise,
+    CounterClockwise,
+    Both,
+}
+
+/// Physical placement of an encoder rotation legend. Only covers CW/CCW rotation.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EncoderTile {
+    pub id: u8,
+    pub direction: EncoderDirection,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub r: f32,
+}
+
 /// Named physical layout option for a keyboard (e.g. "Default", "ISO", "Split Backspace").
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KeyboardLayout {
     pub name: String,
     pub keys: Vec<Key>,
+    #[serde(default)]
+    pub encoders: Vec<EncoderTile>,
 }
 
 impl KeyboardLayout {
     pub fn get_dimensions(&self) -> (f32, f32) {
-        let max_x = self.keys.iter().map(|k| k.x + k.w).fold(0.0, f32::max);
-        let max_y = self.keys.iter().map(|k| k.y + k.h).fold(0.0, f32::max);
+        let max_x = self
+            .keys
+            .iter()
+            .map(|k| k.x + k.w)
+            .chain(self.encoders.iter().map(|e| e.x + e.w))
+            .fold(0.0, f32::max);
+        let max_y = self
+            .keys
+            .iter()
+            .map(|k| k.y + k.h)
+            .chain(self.encoders.iter().map(|e| e.y + e.h))
+            .fold(0.0, f32::max);
         (max_x, max_y)
+    }
+
+    pub fn encoder_count(&self) -> usize {
+        self.encoders
+            .iter()
+            .map(|e| e.id as usize + 1)
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -67,6 +107,7 @@ mod tests {
     fn test_layout_dimensions() {
         let layout = KeyboardLayout {
             name: "test".to_string(),
+            encoders: Vec::new(),
             keys: vec![
                 Key {
                     row: 0,
@@ -110,10 +151,12 @@ mod tests {
             layouts: vec![
                 KeyboardLayout {
                     name: "ANSI".to_string(),
+                    encoders: Vec::new(),
                     keys: vec![],
                 },
                 KeyboardLayout {
                     name: "ISO".to_string(),
+                    encoders: Vec::new(),
                     keys: vec![],
                 },
             ],

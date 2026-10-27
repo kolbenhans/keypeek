@@ -16,7 +16,9 @@ pub use key_spec::{
     RgbAction, RgbMatrixAction, SpaceCadet,
 };
 pub use keyboard::KeyboardDomain;
-pub use layout::{geometry, Key, KeyboardDefinition, KeyboardLayout};
+pub use layout::{
+    geometry, EncoderDirection, EncoderTile, Key, KeyboardDefinition, KeyboardLayout,
+};
 pub use layout_key::{
     behavior_names, modifier_symbols, BorderStyle, KeycodeKind, Label, LayoutKey, HELD_MOD_RALT,
     HELD_MOD_SHIFT, PLAIN_ALT_MOD_MASK,
